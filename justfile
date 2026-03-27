@@ -47,7 +47,7 @@ release version:
     python3 -m unittest scripts.test_changelog
     git add CHANGELOG.md Cargo.toml Cargo.lock
     git diff --cached --quiet || git commit -m "release: v{{version}}"
-    git tag v{{version}}
+    git tag -a v{{version}} -m "v{{version}}"
     git push --follow-tags
     @echo "v{{version}} released — GitHub Actions building binaries"
 
