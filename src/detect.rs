@@ -66,6 +66,25 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     }
 }
 
+pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
+    let mut best: Option<(u8, Agent, String)> = None;
+
+    for process in &job.processes {
+        let candidate = normalized_process_name(process);
+        let Some(agent) = identify_agent(&candidate) else {
+            continue;
+        };
+        let score = process_priority(process, &candidate);
+
+        match &best {
+            Some((best_score, _, _)) if *best_score >= score => {}
+            _ => best = Some((score, agent, candidate)),
+        }
+    }
+
+    best.map(|(_, agent, name)| (agent, name))
+}
+
 /// Detect the state of an agent from the visible screen content.
 /// If `agent` is `None`, returns `Unknown`.
 pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
@@ -497,10 +516,42 @@ fn content_above_prompt_box(content: &str) -> &str {
 // Process identification (platform-specific)
 // ---------------------------------------------------------------------------
 
-/// Get the foreground process name for a given child PID.
+/// Get the foreground job for a given child PID.
 /// Delegates to platform-specific implementation.
-pub fn foreground_process_name(child_pid: u32) -> Option<String> {
-    crate::platform::foreground_process_name(child_pid)
+pub fn foreground_job(child_pid: u32) -> Option<crate::platform::ForegroundJob> {
+    crate::platform::foreground_job(child_pid)
+}
+
+fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
+    let effective = process.argv0.as_deref().unwrap_or(&process.name);
+    let lower_effective = effective.to_lowercase();
+    let lower_cmdline = process.cmdline.as_deref().unwrap_or_default().to_lowercase();
+
+    if lower_effective == "node"
+        && (lower_cmdline.contains("/codex") || lower_cmdline.contains("@openai/codex"))
+    {
+        return "codex".to_string();
+    }
+
+    effective.to_string()
+}
+
+fn process_priority(process: &crate::platform::ForegroundProcess, normalized_name: &str) -> u8 {
+    let lower_name = normalized_name.to_lowercase();
+    if lower_name != process.name.to_lowercase() {
+        return 3;
+    }
+    if !is_generic_runtime_or_shell(&lower_name) {
+        return 2;
+    }
+    1
+}
+
+fn is_generic_runtime_or_shell(name: &str) -> bool {
+    matches!(
+        name,
+        "sh" | "bash" | "zsh" | "fish" | "tmux" | "node" | "bun" | "python" | "python3"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +591,29 @@ mod tests {
         assert_eq!(identify_agent("Pi"), Some(Agent::Pi));
         assert_eq!(identify_agent("CLAUDE"), Some(Agent::Claude));
         assert_eq!(identify_agent("Codex"), Some(Agent::Codex));
+    }
+
+    #[test]
+    fn identify_agent_in_job_prefers_wrapped_codex() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![
+                crate::platform::ForegroundProcess {
+                    pid: 1,
+                    name: "node".to_string(),
+                    argv0: None,
+                    cmdline: Some("node /path/to/bin/codex".to_string()),
+                },
+                crate::platform::ForegroundProcess {
+                    pid: 2,
+                    name: "bash".to_string(),
+                    argv0: None,
+                    cmdline: Some("bash".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(identify_agent_in_job(&job), Some((Agent::Codex, "codex".to_string())));
     }
 
     // ---- Workspace state rollup ----
@@ -1037,7 +1111,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn foreground_process_name_detects_sleep() {
+    fn foreground_job_detects_sleep() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
         let pty_system = native_pty_system();
@@ -1059,8 +1133,9 @@ mod tests {
         // Give the process a moment to become the foreground group
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let name = foreground_process_name(pid);
-        assert_eq!(name.as_deref(), Some("sleep"), "expected 'sleep', got {name:?}");
+        let job = foreground_job(pid).expect("expected foreground job");
+        assert!(job.processes.iter().any(|p| p.name == "sleep"), "expected sleep in {job:?}");
+        assert_eq!(identify_agent_in_job(&job), None, "sleep should not map to an agent");
 
         // Clean up
         child.kill().ok();
@@ -1069,7 +1144,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn foreground_process_name_detects_shell_running_command() {
+    fn foreground_job_detects_shell_running_command() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         use std::io::Write;
 
@@ -1096,9 +1171,9 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let name = foreground_process_name(pid);
-        // The foreground process should now be "sleep", not "sh"
-        assert_eq!(name.as_deref(), Some("sleep"), "expected 'sleep', got {name:?}");
+        let job = foreground_job(pid).expect("expected foreground job");
+        assert!(job.processes.iter().any(|p| p.name == "sleep"), "expected sleep in {job:?}");
+        assert_eq!(identify_agent_in_job(&job), None, "sleep should not map to an agent");
 
         child.kill().ok();
         child.wait().ok();

@@ -2,34 +2,60 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// Get the foreground process name for a given child PID.
-///
-/// Uses `proc_pidinfo(PROC_PIDTBSDINFO)` to read `e_tpgid` — the foreground
-/// process group ID of the child's controlling terminal — then resolves the
-/// group leader to a human-visible name via `KERN_PROCARGS2`.
-///
-/// `KERN_PROCARGS2` reads the process's `argv[0]`, which reflects runtime
-/// title changes (e.g. Node.js `process.title = "pi"`). This matches what
-/// `ps -o comm` displays and is the only reliable way on macOS to see the
-/// effective command name for scripting runtimes.
-///
-/// Falls back to `pbi_comm` from `proc_pidinfo` if `KERN_PROCARGS2` fails.
-pub fn foreground_process_name(child_pid: u32) -> Option<String> {
+use super::{ForegroundJob, ForegroundProcess};
+
+/// Collect the foreground terminal job for a given child PID.
+pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     if child_pid == 0 {
         return None;
     }
 
     let fg_pgid = foreground_pgid(child_pid)?;
-
-    // Primary: argv[0] via KERN_PROCARGS2 (reflects process.title changes)
-    // Note: we use the PGID as a PID — works because the group leader's PID
-    // equals the PGID. Same assumption Linux makes with /proc/{tpgid}/comm.
-    if let Some(name) = process_argv0_name(fg_pgid) {
-        return Some(name);
+    let mut pids = vec![0i32; 4096];
+    let bytes = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr() as *mut libc::c_void,
+            (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
+        )
+    };
+    if bytes <= 0 {
+        return None;
     }
 
-    // Fallback: kernel comm name from proc_pidinfo
-    process_comm_name(fg_pgid)
+    let count = (bytes as usize) / std::mem::size_of::<i32>();
+    let mut processes = Vec::new();
+
+    for raw_pid in pids.into_iter().take(count) {
+        if raw_pid <= 0 {
+            continue;
+        }
+        let pid = raw_pid as u32;
+        let Some(info) = process_bsdinfo(pid) else {
+            continue;
+        };
+        if info.pbi_pgid as u32 != fg_pgid {
+            continue;
+        }
+
+        let Some(name) = comm_from_bsdinfo(&info) else {
+            continue;
+        };
+        processes.push(ForegroundProcess {
+            pid,
+            name,
+            argv0: process_argv0_name(pid),
+            cmdline: process_cmdline(pid),
+        });
+    }
+
+    if processes.is_empty() {
+        return None;
+    }
+
+    Some(ForegroundJob {
+        process_group_id: fg_pgid,
+        processes,
+    })
 }
 
 /// Read `e_tpgid` (foreground process group of the controlling terminal)
@@ -151,6 +177,10 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
 /// This is the kernel-level short command name (like `node`, `zsh`).
 /// It does NOT reflect `process.title` changes.
 fn process_comm_name(pid: u32) -> Option<String> {
+    process_bsdinfo(pid).and_then(|info| comm_from_bsdinfo(&info))
+}
+
+fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
 
@@ -164,10 +194,10 @@ fn process_comm_name(pid: u32) -> Option<String> {
         )
     };
 
-    if ret != size {
-        return None;
-    }
+    (ret == size).then_some(info)
+}
 
+fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
     let end = info
         .pbi_comm
         .iter()
@@ -179,6 +209,37 @@ fn process_comm_name(pid: u32) -> Option<String> {
 
     let bytes: Vec<u8> = info.pbi_comm[..end].iter().map(|&b| b as u8).collect();
     String::from_utf8(bytes).ok()
+}
+
+fn process_cmdline(pid: u32) -> Option<String> {
+    let buf = kern_procargs2(pid)?;
+    if buf.len() < 4 {
+        return None;
+    }
+
+    let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if argc < 1 {
+        return None;
+    }
+
+    let rest = &buf[4..];
+    let mut start = 0usize;
+    while start < rest.len() && rest[start] != 0 {
+        start += 1;
+    }
+    while start < rest.len() && rest[start] == 0 {
+        start += 1;
+    }
+    if start >= rest.len() {
+        return None;
+    }
+
+    let parts: Vec<String> = rest[start..]
+        .split(|&b| b == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// Get the current working directory of a process.

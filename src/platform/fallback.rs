@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use super::ForegroundJob;
+
 /// Unsupported platform stub.
-pub fn foreground_process_name(_child_pid: u32) -> Option<String> {
+pub fn foreground_job(_child_pid: u32) -> Option<ForegroundJob> {
     None
 }
 

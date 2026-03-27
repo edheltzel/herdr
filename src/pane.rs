@@ -227,15 +227,26 @@ impl PaneRuntime {
                         last_process_check = now;
                         let pid = child_pid.load(Ordering::Acquire);
                         if pid > 0 {
-                            if let Some(name) = detect::foreground_process_name(pid) {
-                                let new_agent = detect::identify_agent(&name);
+                            if let Some(job) = detect::foreground_job(pid) {
+                                let identified = detect::identify_agent_in_job(&job);
+                                let new_agent = identified.as_ref().map(|(agent, _)| *agent);
                                 if new_agent != agent {
-                                    info!(
-                                        pane = pane_id.raw(),
-                                        ?new_agent,
-                                        process = %name,
-                                        "agent changed"
-                                    );
+                                    if let Some((_, process_name)) = identified {
+                                        info!(
+                                            pane = pane_id.raw(),
+                                            ?new_agent,
+                                            process = %process_name,
+                                            pgid = job.process_group_id,
+                                            "agent changed"
+                                        );
+                                    } else {
+                                        info!(
+                                            pane = pane_id.raw(),
+                                            ?new_agent,
+                                            pgid = job.process_group_id,
+                                            "agent changed"
+                                        );
+                                    }
                                     agent = new_agent;
                                     agent_changed = true;
                                 }
