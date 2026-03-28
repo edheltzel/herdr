@@ -255,24 +255,21 @@ fn render_sidebar(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let mut line1 = vec![Span::styled(marker, text_style)];
+        let mut line1 = vec![
+            Span::styled(marker, text_style),
+            Span::styled(
+                ws.display_name(),
+                text_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", dim_style),
+        ];
 
         if ws.layout.pane_count() == 1 {
             line1.push(Span::styled(
                 icon,
                 if selected { icon_style.bg(app.accent) } else { icon_style },
             ));
-            line1.push(Span::styled(" ", text_style));
-            line1.push(Span::styled(
-                ws.display_name(),
-                text_style.add_modifier(Modifier::BOLD),
-            ));
         } else {
-            line1.push(Span::styled(
-                ws.display_name(),
-                text_style.add_modifier(Modifier::BOLD),
-            ));
-            line1.push(Span::styled("  ", dim_style));
             for (pane_state, pane_seen) in ws.pane_states() {
                 let (pane_icon, pane_style) = state_icon_style(pane_state, pane_seen);
                 line1.push(Span::styled(

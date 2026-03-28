@@ -154,9 +154,9 @@ impl Workspace {
         } else if names.len() == 1 {
             Some(names[0].to_string())
         } else if names.len() == 2 {
-            Some(format!("{} + {}", names[0], names[1]))
+            Some(format!("{}, {}", names[0], names[1]))
         } else {
-            Some(format!("{} + {} +{}", names[0], names[1], names.len() - 2))
+            Some(format!("{}, {} +{}", names[0], names[1], names.len() - 2))
         }
     }
 
