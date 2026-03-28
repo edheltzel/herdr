@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::events::AppEvent;
 use crate::workspace::Workspace;
 
-pub use state::{AppState, Mode, ViewState, CONTEXT_MENU_ITEMS};
+pub use state::{AppState, Mode, ToastKind, ViewState, CONTEXT_MENU_ITEMS};
 
 /// Full application: AppState + runtime concerns (event channels, async I/O).
 pub struct App {
@@ -30,6 +30,7 @@ pub struct App {
     event_rx: mpsc::Receiver<AppEvent>,
     no_session: bool,
     config_diagnostic_deadline: Option<Instant>,
+    toast_deadline: Option<Instant>,
 }
 
 impl App {
@@ -55,7 +56,9 @@ impl App {
             (Vec::new(), None, 0)
         };
 
-        let mode = if active.is_some() {
+        let mode = if config.should_show_onboarding() {
+            state::Mode::Onboarding
+        } else if active.is_some() {
             state::Mode::Terminal
         } else {
             state::Mode::Navigate
@@ -68,7 +71,10 @@ impl App {
             mode,
             should_quit: false,
             request_new_workspace: false,
+            request_complete_onboarding: false,
             name_input: String::new(),
+            onboarding_step: 0,
+            onboarding_selected: 1,
             view: state::ViewState {
                 sidebar_rect: Rect::default(),
                 terminal_area: Rect::default(),
@@ -81,6 +87,7 @@ impl App {
             update_available: None,
             update_dismissed: false,
             config_diagnostic,
+            toast: None,
             prefix_code,
             prefix_mods,
             sidebar_width: config.ui.sidebar_width,
@@ -88,6 +95,7 @@ impl App {
             confirm_close: config.ui.confirm_close,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
+            toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
         };
 
@@ -102,6 +110,7 @@ impl App {
                 .config_diagnostic
                 .as_ref()
                 .map(|_| Instant::now() + Duration::from_secs(8)),
+            toast_deadline: None,
             state,
             event_tx,
             event_rx,
@@ -119,6 +128,14 @@ impl App {
                 self.state.config_diagnostic = None;
             }
 
+            if self
+                .toast_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.toast_deadline = None;
+                self.state.toast = None;
+            }
+
             terminal.draw(|frame| {
                 crate::ui::compute_view(&mut self.state, frame.area());
                 crate::ui::render(&self.state, frame);
@@ -126,7 +143,17 @@ impl App {
 
             // Drain internal events
             while let Ok(ev) = self.event_rx.try_recv() {
+                let previous_toast = self.state.toast.clone();
                 self.state.handle_app_event(ev);
+                if self.state.toast != previous_toast {
+                    self.toast_deadline = self.state.toast.as_ref().map(|toast| {
+                        let duration = match toast.kind {
+                            ToastKind::NeedsAttention => Duration::from_secs(8),
+                            ToastKind::Finished => Duration::from_secs(5),
+                        };
+                        Instant::now() + duration
+                    });
+                }
             }
 
             if event::poll(Duration::from_millis(16))? {
@@ -139,6 +166,11 @@ impl App {
                     Event::Resize(_, _) => {}
                     _ => {}
                 }
+            }
+
+            if self.state.request_complete_onboarding {
+                self.state.request_complete_onboarding = false;
+                self.complete_onboarding();
             }
 
             if self.state.request_new_workspace {
@@ -158,6 +190,32 @@ impl App {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn complete_onboarding(&mut self) {
+        let (sound_enabled, toast_enabled) = match self.state.onboarding_selected {
+            0 => (false, false),
+            1 => (false, true),
+            2 => (true, false),
+            _ => (true, true),
+        };
+
+        match crate::config::save_onboarding_choices(sound_enabled, toast_enabled) {
+            Ok(()) => {
+                self.state.sound.enabled = sound_enabled;
+                self.state.toast_config.enabled = toast_enabled;
+                self.state.mode = if self.state.active.is_some() {
+                    Mode::Terminal
+                } else {
+                    Mode::Navigate
+                };
+            }
+            Err(err) => {
+                self.state.config_diagnostic =
+                    Some(format!("failed to save onboarding config: {err}"));
+                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+            }
+        }
     }
 
     /// Create a workspace with a real PTY (needs event_tx).

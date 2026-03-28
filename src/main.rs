@@ -63,6 +63,10 @@ fn init_logging() {
 const DEFAULT_CONFIG: &str = r#"# herdr configuration
 # Place this file at ~/.config/herdr/config.toml
 
+# Show first-run notification setup on startup.
+# Missing also shows onboarding; set false after you've chosen.
+# onboarding = true
+
 [keys]
 # Prefix key to enter navigate mode (default: "ctrl+b")
 # Examples: "ctrl+b", "f12", "esc", "-"
@@ -92,6 +96,10 @@ const DEFAULT_CONFIG: &str = r#"# herdr configuration
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
+
+# Optional visual toast notifications for background workspace events
+[ui.toast]
+# enabled = false
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]

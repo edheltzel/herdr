@@ -1,4 +1,4 @@
-use crate::config::{Keybinds, SoundConfig};
+use crate::config::{Keybinds, SoundConfig, ToastConfig};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -18,6 +18,7 @@ pub struct ViewState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    Onboarding,
     Navigate,
     Terminal,
     RenameSession,
@@ -43,6 +44,19 @@ pub struct ContextMenuState {
 
 pub const CONTEXT_MENU_ITEMS: &[&str] = &["Rename", "Close"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    NeedsAttention,
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastNotification {
+    pub kind: ToastKind,
+    pub title: String,
+    pub context: String,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -52,7 +66,10 @@ pub struct AppState {
     pub mode: Mode,
     pub should_quit: bool,
     pub request_new_workspace: bool,
+    pub request_complete_onboarding: bool,
     pub name_input: String,
+    pub onboarding_step: usize,
+    pub onboarding_selected: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -62,6 +79,7 @@ pub struct AppState {
     pub update_available: Option<String>,
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
+    pub toast: Option<ToastNotification>,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -70,6 +88,7 @@ pub struct AppState {
     pub confirm_close: bool,
     pub accent: Color,
     pub sound: SoundConfig,
+    pub toast_config: ToastConfig,
     pub keybinds: Keybinds,
 }
 
@@ -121,7 +140,10 @@ impl AppState {
             mode: Mode::Navigate,
             should_quit: false,
             request_new_workspace: false,
+            request_complete_onboarding: false,
             name_input: String::new(),
+            onboarding_step: 0,
+            onboarding_selected: 1,
             view: ViewState {
                 sidebar_rect: Rect::default(),
                 terminal_area: Rect::default(),
@@ -134,6 +156,7 @@ impl AppState {
             update_available: None,
             update_dismissed: false,
             config_diagnostic: None,
+            toast: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             sidebar_width: 26,
@@ -144,6 +167,7 @@ impl AppState {
                 enabled: false,
                 ..SoundConfig::default()
             },
+            toast_config: ToastConfig::default(),
             keybinds: Keybinds {
                 new_workspace: (KeyCode::Char('n'), KeyModifiers::empty()),
                 new_workspace_label: "n".into(),

@@ -18,6 +18,7 @@ use super::App;
 impl App {
     pub(super) async fn handle_key(&mut self, key: KeyEvent) {
         match self.state.mode {
+            Mode::Onboarding => self.handle_onboarding_key(key),
             Mode::Navigate => handle_navigate_key(&mut self.state, key),
             Mode::Terminal => self.handle_terminal_key(key).await,
             Mode::RenameSession => handle_rename_key(&mut self.state, key),
@@ -46,6 +47,39 @@ impl App {
                 };
                 let _ = rt.sender.send(Bytes::from(payload)).await;
             }
+        }
+    }
+
+    fn handle_onboarding_key(&mut self, key: KeyEvent) {
+        match self.state.onboarding_step {
+            0 => match key.code {
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    self.state.onboarding_step = 1;
+                }
+                KeyCode::Char('q') => self.state.should_quit = true,
+                _ => {}
+            },
+            _ => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.state.onboarding_selected > 0 {
+                        self.state.onboarding_selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.state.onboarding_selected < 3 {
+                        self.state.onboarding_selected += 1;
+                    }
+                }
+                KeyCode::Left | KeyCode::Esc | KeyCode::Char('h') => {
+                    self.state.onboarding_step = 0;
+                }
+                KeyCode::Char(c) if ('1'..='4').contains(&c) => {
+                    self.state.onboarding_selected = (c as usize) - ('1' as usize);
+                }
+                KeyCode::Enter => self.complete_onboarding(),
+                KeyCode::Char('q') => self.state.should_quit = true,
+                _ => {}
+            },
         }
     }
 
@@ -338,7 +372,76 @@ fn handle_context_menu_key(state: &mut AppState, key: KeyEvent) {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    fn onboarding_full_area(&self) -> ratatui::layout::Rect {
+        self.view.sidebar_rect.union(self.view.terminal_area)
+    }
+
+    fn onboarding_modal_inner(&self, popup_w: u16, popup_h: u16) -> Option<ratatui::layout::Rect> {
+        let area = self.onboarding_full_area();
+        let popup_w = popup_w.min(area.width.saturating_sub(4));
+        let popup_h = popup_h.min(area.height.saturating_sub(2));
+        if popup_w < 4 || popup_h < 4 {
+            return None;
+        }
+        let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+        let popup = ratatui::layout::Rect::new(popup_x, popup_y, popup_w, popup_h);
+        let block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        Some(block.inner(popup))
+    }
+
+    fn handle_onboarding_mouse(&mut self, mouse: MouseEvent) {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+
+        match self.onboarding_step {
+            0 => {
+                let Some(inner) = self.onboarding_modal_inner(64, 15) else {
+                    return;
+                };
+                let footer_y = inner.y + 9;
+                let button_x = inner.x;
+                let button_w = 14;
+                if mouse.row == footer_y
+                    && mouse.column >= button_x
+                    && mouse.column < button_x + button_w
+                {
+                    self.onboarding_step = 1;
+                }
+            }
+            _ => {
+                let Some(inner) = self.onboarding_modal_inner(52, 10) else {
+                    return;
+                };
+                let options_start_y = inner.y + 2;
+                if mouse.row >= options_start_y && mouse.row < options_start_y + 4 {
+                    self.onboarding_selected = (mouse.row - options_start_y) as usize;
+                    return;
+                }
+
+                let footer_y = inner.y + 6;
+                let back_x = inner.x;
+                let back_w = 10;
+                let save_x = inner.x + 12;
+                let save_w = 10;
+                if mouse.row == footer_y {
+                    if mouse.column >= back_x && mouse.column < back_x + back_w {
+                        self.onboarding_step = 0;
+                    } else if mouse.column >= save_x && mouse.column < save_x + save_w {
+                        self.request_complete_onboarding = true;
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.mode == Mode::Onboarding {
+            self.handle_onboarding_mouse(mouse);
+            return;
+        }
+
         let sidebar = self.view.sidebar_rect;
         let in_sidebar = mouse.column >= sidebar.x
             && mouse.column < sidebar.x + sidebar.width

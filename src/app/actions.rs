@@ -7,7 +7,7 @@ use crate::detect::AgentState;
 use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 
-use super::state::{AppState, Mode};
+use super::state::{AppState, Mode, ToastKind, ToastNotification};
 
 fn notification_sound_for_state_change(
     is_active_ws: bool,
@@ -24,6 +24,38 @@ fn notification_sound_for_state_change(
             Some(crate::sound::Sound::Done)
         }
         _ => None,
+    }
+}
+
+fn notification_toast_for_state_change(
+    is_active_ws: bool,
+    prev_state: AgentState,
+    new_state: AgentState,
+) -> Option<ToastKind> {
+    if is_active_ws || new_state == prev_state {
+        return None;
+    }
+
+    match new_state {
+        AgentState::Waiting => Some(ToastKind::NeedsAttention),
+        AgentState::Idle if prev_state != AgentState::Idle => Some(ToastKind::Finished),
+        _ => None,
+    }
+}
+
+fn agent_label(agent: crate::detect::Agent) -> &'static str {
+    match agent {
+        crate::detect::Agent::Pi => "pi",
+        crate::detect::Agent::Claude => "claude",
+        crate::detect::Agent::Codex => "codex",
+        crate::detect::Agent::Gemini => "gemini",
+        crate::detect::Agent::Cursor => "cursor",
+        crate::detect::Agent::Cline => "cline",
+        crate::detect::Agent::OpenCode => "opencode",
+        crate::detect::Agent::GithubCopilot => "copilot",
+        crate::detect::Agent::Kimi => "kimi",
+        crate::detect::Agent::Droid => "droid",
+        crate::detect::Agent::Amp => "amp",
     }
 }
 
@@ -174,6 +206,7 @@ impl AppState {
                 state,
             } => {
                 for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
+                    let workspace_name = ws.display_name();
                     if let Some(pane) = ws.panes.get_mut(&pane_id) {
                         let is_active_ws = self.active == Some(ws_idx);
                         let prev_state = pane.state;
@@ -192,6 +225,27 @@ impl AppState {
                                 notification_sound_for_state_change(is_active_ws, prev_state, state)
                             {
                                 crate::sound::play(sound);
+                            }
+                        }
+
+                        if self.toast_config.enabled {
+                            if let (Some(agent), Some(kind)) = (
+                                agent,
+                                notification_toast_for_state_change(
+                                    is_active_ws,
+                                    prev_state,
+                                    state,
+                                ),
+                            ) {
+                                let event_text = match kind {
+                                    ToastKind::NeedsAttention => "needs attention",
+                                    ToastKind::Finished => "finished",
+                                };
+                                self.toast = Some(ToastNotification {
+                                    kind,
+                                    title: format!("{} {}", agent_label(agent), event_text),
+                                    context: format!("{} · {}", workspace_name, ws_idx + 1),
+                                });
                             }
                         }
 
@@ -431,6 +485,65 @@ mod tests {
             notification_sound_for_state_change(true, AgentState::Busy, AgentState::Idle),
             None
         );
+    }
+
+    #[test]
+    fn background_waiting_sets_attention_toast() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Waiting,
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "pi needs attention");
+        assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn background_idle_sets_finished_toast() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        state.workspaces[1]
+            .panes
+            .get_mut(&bg_pane_id)
+            .unwrap()
+            .state = AgentState::Busy;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Droid),
+            state: AgentState::Idle,
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::Finished);
+        assert_eq!(toast.title, "droid finished");
+        assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn active_workspace_does_not_set_toast() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Waiting,
+        });
+
+        assert!(state.toast.is_none());
     }
 
     #[test]

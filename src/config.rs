@@ -6,9 +6,16 @@ use tracing::warn;
 
 use crate::detect::Agent;
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ToastConfig {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub onboarding: Option<bool>,
     pub keys: KeysConfig,
     pub ui: UiConfig,
 }
@@ -53,6 +60,8 @@ pub struct UiConfig {
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Optional visual toast notifications for background workspace events.
+    pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
 }
@@ -141,8 +150,15 @@ impl Default for UiConfig {
             sidebar_width: 26,
             confirm_close: true,
             accent: "cyan".into(),
+            toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
+    }
+}
+
+impl Default for ToastConfig {
+    fn default() -> Self {
+        Self { enabled: false }
     }
 }
 
@@ -174,6 +190,10 @@ impl Default for AgentSoundOverrides {
 }
 
 impl Config {
+    pub fn should_show_onboarding(&self) -> bool {
+        self.onboarding.unwrap_or(true)
+    }
+
     pub fn load() -> LoadedConfig {
         let path = config_path();
         if path.exists() {
@@ -470,7 +490,20 @@ pub fn parse_color(s: &str) -> ratatui::style::Color {
     }
 }
 
-fn config_path() -> PathBuf {
+pub fn save_onboarding_choices(sound_enabled: bool, toast_enabled: bool) -> std::io::Result<()> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let content = upsert_top_level_bool(&content, "onboarding", false);
+    let content = upsert_section_bool(&content, "ui.sound", "enabled", sound_enabled);
+    let content = upsert_section_bool(&content, "ui.toast", "enabled", toast_enabled);
+    std::fs::write(path, content)
+}
+
+pub fn config_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(dir).join("herdr/config.toml")
     } else if let Ok(home) = std::env::var("HOME") {
@@ -478,6 +511,93 @@ fn config_path() -> PathBuf {
     } else {
         PathBuf::from("/tmp/herdr/config.toml")
     }
+}
+
+fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {
+    let replacement = format!("{key} = {value}");
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let mut in_section = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            continue;
+        }
+        if trimmed.starts_with(&format!("{key} ")) || trimmed.starts_with(&format!("{key}=")) {
+            *line = replacement.clone();
+            return lines.join("\n") + "\n";
+        }
+    }
+
+    if lines.is_empty() {
+        format!("{replacement}\n")
+    } else {
+        format!("{replacement}\n{}\n", lines.join("\n").trim_end())
+    }
+}
+
+fn upsert_section_bool(content: &str, section: &str, key: &str, value: bool) -> String {
+    let header = format!("[{section}]");
+    let assignment = format!("{key} = {value}");
+    let lines: Vec<&str> = content.lines().collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+    let mut found_section = false;
+    let mut inserted = false;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed == header {
+            found_section = true;
+            result.push(line.to_string());
+            i += 1;
+
+            while i < lines.len() {
+                let current = lines[i];
+                let current_trimmed = current.trim();
+                if current_trimmed.starts_with('[') && current_trimmed.ends_with(']') {
+                    if !inserted {
+                        result.push(assignment.clone());
+                        inserted = true;
+                    }
+                    break;
+                }
+
+                if current_trimmed.starts_with(&format!("{key} "))
+                    || current_trimmed.starts_with(&format!("{key}="))
+                {
+                    result.push(assignment.clone());
+                    inserted = true;
+                } else {
+                    result.push(current.to_string());
+                }
+                i += 1;
+            }
+
+            continue;
+        }
+
+        result.push(line.to_string());
+        i += 1;
+    }
+
+    if !found_section {
+        if !result.is_empty() && !result.last().is_some_and(|line| line.trim().is_empty()) {
+            result.push(String::new());
+        }
+        result.push(header);
+        result.push(assignment);
+    } else if found_section && !inserted {
+        result.push(assignment);
+    }
+
+    result.join("\n") + "\n"
 }
 
 fn parse_key_combo(s: &str) -> Option<(KeyCode, KeyModifiers)> {
@@ -721,6 +841,43 @@ rename_workspace = "wat"
             (KeyCode::Char('n'), KeyModifiers::SHIFT)
         );
         assert_eq!(kb.rename_workspace_label, "shift+n");
+    }
+
+    #[test]
+    fn toast_config_parses() {
+        let toml = r#"
+[ui.toast]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.toast.enabled);
+    }
+
+    #[test]
+    fn missing_onboarding_shows_setup() {
+        let config = Config::default();
+        assert!(config.should_show_onboarding());
+    }
+
+    #[test]
+    fn onboarding_false_skips_setup() {
+        let config: Config = toml::from_str("onboarding = false").unwrap();
+        assert!(!config.should_show_onboarding());
+    }
+
+    #[test]
+    fn upsert_top_level_bool_replaces_existing_value() {
+        let content = "onboarding = true\n[keys]\nprefix = \"ctrl+b\"\n";
+        let updated = upsert_top_level_bool(content, "onboarding", false);
+        assert!(updated.contains("onboarding = false"));
+        assert!(!updated.contains("onboarding = true"));
+    }
+
+    #[test]
+    fn upsert_section_bool_adds_missing_section() {
+        let updated = upsert_section_bool("", "ui.toast", "enabled", true);
+        assert!(updated.contains("[ui.toast]"));
+        assert!(updated.contains("enabled = true"));
     }
 
     #[test]

@@ -14,6 +14,21 @@ herdr --default-config
 
 if a config value is invalid, or two navigate actions use the same keybinding, herdr falls back to a safe default and shows a startup warning in the UI.
 
+## onboarding
+
+```toml
+onboarding = true
+```
+
+| option | default | description |
+|--------|---------|-------------|
+| `onboarding` | unset | show first-run notification setup; set `false` after choosing |
+
+notes:
+- missing `onboarding` currently behaves like `true`
+- set `onboarding = true` to force the setup screen again for testing
+- after onboarding, herdr writes `onboarding = false` plus the chosen sound/toast settings
+
 ## keybindings
 
 keybindings live under `[keys]`.
@@ -82,6 +97,26 @@ accent = "cyan"
 - named colors like `cyan`, `blue`, `magenta`
 - hex like `#89b4fa`
 - rgb like `rgb(137,180,250)`
+
+## toast notifications
+
+```toml
+[ui.toast]
+enabled = false
+```
+
+### options
+
+| option | default | description |
+|--------|---------|-------------|
+| `ui.toast.enabled` | `false` | show top-right visual toasts for background agent events |
+
+current v1 behavior:
+- informational only
+- one toast at a time
+- top-right placement
+- shown for background agent events like `needs attention` and `finished`
+- no keyboard action or temporary key semantics
 
 ## sound
 

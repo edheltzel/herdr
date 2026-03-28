@@ -7,6 +7,7 @@ use ratatui::{
 };
 use tui_term::widget::PseudoTerminal;
 
+use crate::app::state::{ToastKind, ToastNotification};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::layout::PaneInfo;
@@ -60,6 +61,7 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     render_panes(app, frame, terminal_area);
 
     match app.mode {
+        Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::Navigate => render_navigate_overlay(app, frame, terminal_area),
         Mode::Resize => render_resize_overlay(app, frame, terminal_area),
         Mode::ConfirmClose => render_confirm_close_overlay(app, frame, terminal_area),
@@ -77,8 +79,12 @@ pub fn render(app: &AppState, frame: &mut Frame) {
             render_update_notification(frame, terminal_area, version, app.accent);
         }
     }
+    let has_config_diagnostic = app.config_diagnostic.is_some();
     if let Some(message) = &app.config_diagnostic {
         render_config_diagnostic(frame, terminal_area, message);
+    }
+    if let Some(toast) = &app.toast {
+        render_toast_notification(frame, terminal_area, toast, has_config_diagnostic);
     }
 }
 
@@ -513,6 +519,227 @@ fn render_empty(frame: &mut Frame, area: Rect, accent: Color) {
     );
 }
 
+const ONBOARDING_PREFIX_LABEL: &str = "ctrl+b";
+
+fn dim_background(frame: &mut Frame, area: Rect) {
+    let buf = frame.buffer_mut();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = &mut buf[(x, y)];
+            cell.set_style(cell.style().add_modifier(Modifier::DIM));
+        }
+    }
+}
+
+fn render_modal_shell(
+    frame: &mut Frame,
+    area: Rect,
+    popup_w: u16,
+    popup_h: u16,
+    accent: Color,
+) -> Option<Rect> {
+    let popup_w = popup_w.min(area.width.saturating_sub(4));
+    let popup_h = popup_h.min(area.height.saturating_sub(2));
+    if popup_w < 4 || popup_h < 4 {
+        return None;
+    }
+
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    Some(inner)
+}
+
+fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, accent: Color) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        area,
+    );
+}
+
+fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    dim_background(frame, area);
+
+    match app.onboarding_step {
+        0 => render_onboarding_welcome(app, frame, area),
+        _ => render_onboarding_notifications(app, frame, area),
+    }
+}
+
+fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(inner) = render_modal_shell(frame, area, 64, 15, app.accent) else {
+        return;
+    };
+    if inner.height < 10 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas::<11>(inner);
+
+    frame.render_widget(
+        Paragraph::new("  herdr").style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new("  workspace manager for coding agents")
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
+
+    let line1 = Line::from(vec![
+        Span::styled(
+            format!("  {}", ONBOARDING_PREFIX_LABEL),
+            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" navigate ", Style::default().fg(Color::Gray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled(" click sidebar ", Style::default().fg(Color::Gray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled(" scroll panes", Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(Paragraph::new(line1), rows[4]);
+
+    let line2 = Line::from(vec![
+        Span::styled(
+            "  ↑↓",
+            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" switch workspace ", Style::default().fg(Color::Gray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled(" drag borders ", Style::default().fg(Color::Gray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " ⇥",
+            Style::default().fg(app.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" pane", Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(Paragraph::new(line2), rows[5]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("  ● ", Style::default().fg(Color::Red)),
+            Span::styled("needs you    ", Style::default().fg(Color::Gray)),
+            Span::styled("○ ", Style::default().fg(Color::Yellow)),
+            Span::styled("working    ", Style::default().fg(Color::Gray)),
+            Span::styled("◌ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("no agent", Style::default().fg(Color::Gray)),
+        ])),
+        rows[7],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "  continue  ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   readme has config and more",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        rows[9],
+    );
+}
+
+fn render_onboarding_notifications(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(inner) = render_modal_shell(frame, area, 52, 10, app.accent) else {
+        return;
+    };
+
+    if inner.height < 7 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas::<7>(inner);
+
+    render_modal_header(frame, rows[0], "choose notification style", app.accent);
+    frame.render_widget(
+        Paragraph::new(" herdr can alert you when background work needs attention or finishes.")
+            .style(Style::default().fg(Color::Gray)),
+        rows[1],
+    );
+
+    let options = [
+        "quiet        no sound, no visual toasts",
+        "visual only  top-right toasts, no sound",
+        "sound only   sound alerts, no toasts",
+        "both         sound and visual toasts",
+    ];
+
+    for (idx, option) in options.iter().enumerate() {
+        let selected = idx == app.onboarding_selected;
+        let prefix = if selected { "›" } else { " " };
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(app.accent)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        frame.render_widget(
+            Paragraph::new(format!(" {prefix} {}. {option}", idx + 1)).style(style),
+            rows[idx + 2],
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" [ back ] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                " [ save ] ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        rows[6],
+    );
+}
+
 /// Floating overlay for navigate mode — appears at bottom of terminal area.
 fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let key = Style::default().fg(app.accent).add_modifier(Modifier::BOLD);
@@ -785,6 +1012,57 @@ fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, acce
         )),
         notif_area,
     );
+}
+
+fn render_toast_notification(
+    frame: &mut Frame,
+    area: Rect,
+    toast: &ToastNotification,
+    offset_for_warning: bool,
+) {
+    let dot_color = match toast.kind {
+        ToastKind::NeedsAttention => Color::Red,
+        ToastKind::Finished => Color::Blue,
+    };
+    let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
+    let width = content_width.saturating_add(2).min(area.width);
+    let height = 4u16.min(area.height);
+    let x = area.x + area.width.saturating_sub(width);
+    let y = area.y + if offset_for_warning { 1 } else { 0 };
+    let toast_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, toast_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(toast_area);
+    frame.render_widget(block, toast_area);
+
+    if inner.height < 2 {
+        return;
+    }
+
+    let [title_row, context_row] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+
+    let title = Line::from(vec![
+        Span::styled("●", Style::default().fg(dot_color)),
+        Span::raw(" "),
+        Span::styled(
+            &toast.title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let context = Line::from(vec![
+        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&toast.context, Style::default().fg(Color::DarkGray)),
+    ]);
+
+    frame.render_widget(Paragraph::new(title), title_row);
+    frame.render_widget(Paragraph::new(context), context_row);
 }
 
 /// Visual badge for a pane's state + seen flag.
