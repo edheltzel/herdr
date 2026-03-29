@@ -389,11 +389,18 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
 }
 
-/// Active mouse drag on a split border.
+pub(crate) enum DragTarget {
+    PaneSplit {
+        path: Vec<bool>,
+        direction: Direction,
+        area: Rect,
+    },
+    SidebarDivider,
+}
+
+/// Active mouse drag on a split border or sidebar divider.
 pub(crate) struct DragState {
-    pub path: Vec<bool>,
-    pub direction: Direction,
-    pub area: Rect,
+    pub target: DragTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,6 +471,7 @@ pub struct AppState {
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
     pub sidebar_width: u16,
+    pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     pub confirm_close: bool,
     pub confirm_close_selected_confirm: bool,
@@ -554,6 +562,7 @@ impl AppState {
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             sidebar_width: 26,
+            sidebar_width_auto: true,
             sidebar_collapsed: false,
             confirm_close: true,
             confirm_close_selected_confirm: true,

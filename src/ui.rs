@@ -13,8 +13,8 @@ use crate::detect::AgentState;
 use crate::layout::PaneInfo;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
-const MIN_SIDEBAR_WIDTH: u16 = 18;
-const MAX_SIDEBAR_WIDTH: u16 = 36;
+pub(crate) const MIN_SIDEBAR_WIDTH: u16 = 18;
+pub(crate) const MAX_SIDEBAR_WIDTH: u16 = 36;
 
 // Braille spinner frames — smooth rotation
 const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -32,8 +32,11 @@ use crate::app::state::Palette;
 pub fn compute_view(app: &mut AppState, area: Rect) {
     let sidebar_w = if app.sidebar_collapsed {
         COLLAPSED_WIDTH
-    } else {
+    } else if app.sidebar_width_auto {
         compute_sidebar_width(app)
+    } else {
+        app.sidebar_width
+            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
     };
 
     let [sidebar_area, main_area] =
@@ -159,7 +162,9 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 fn compute_sidebar_width(app: &AppState) -> u16 {
     if app.workspaces.is_empty() {
-        return app.sidebar_width;
+        return app
+            .sidebar_width
+            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
     }
     let max_line = app
         .workspaces
@@ -570,11 +575,11 @@ fn render_sidebar_toggle(frame: &mut Frame, area: Rect, collapsed: bool, p: &Pal
 
 fn render_panes(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(ws_idx) = app.active else {
-        render_empty(frame, area, &app.palette);
+        render_empty(app, frame, area);
         return;
     };
     let Some(ws) = app.workspaces.get(ws_idx) else {
-        render_empty(frame, area, &app.palette);
+        render_empty(app, frame, area);
         return;
     };
 
@@ -690,19 +695,29 @@ fn render_selection_highlight(
     }
 }
 
-fn render_empty(frame: &mut Frame, area: Rect, p: &Palette) {
+fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
     let lines = vec![
         Line::from(""),
         Line::from(""),
         Line::from(Span::styled(
-            "  No active workspace",
+            "  No workspaces yet",
             Style::default().fg(p.overlay0),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  A workspace is one project context.",
+            Style::default().fg(p.overlay1),
+        )),
+        Line::from(Span::styled(
+            "  Its root pane (top-left) sets the default repo or folder name.",
+            Style::default().fg(p.overlay1),
         )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  Press ", Style::default().fg(p.overlay0)),
             Span::styled(
-                "new",
+                format!("{}", app.keybinds.new_workspace_label),
                 Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" to create one", Style::default().fg(p.overlay0)),

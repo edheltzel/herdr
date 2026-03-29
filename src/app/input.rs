@@ -8,7 +8,9 @@ use tracing::warn;
 use crate::layout::{NavDirection, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
-use super::state::{key_matches, AppState, ContextMenuKind, ContextMenuState, DragState, Mode};
+use super::state::{
+    key_matches, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget, Mode,
+};
 use super::App;
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,22 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.state.on_sidebar_divider(mouse.column, mouse.row)
+        {
+            let now = std::time::Instant::now();
+            let is_double_click = self
+                .last_sidebar_divider_click
+                .is_some_and(|last| now.duration_since(last) <= super::SIDEBAR_DOUBLE_CLICK_WINDOW);
+            self.last_sidebar_divider_click = Some(now);
+
+            if is_double_click {
+                self.state.sidebar_width_auto = true;
+                self.state.drag = None;
+                return;
+            }
+        }
+
         if let Some(action) = self.state.handle_mouse(mouse) {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
@@ -857,12 +875,23 @@ impl AppState {
                     return None;
                 }
 
+                if self.on_sidebar_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::SidebarDivider,
+                    });
+                    self.sidebar_width_auto = false;
+                    self.set_manual_sidebar_width(mouse.column);
+                    return None;
+                }
+
                 if !in_sidebar {
                     if let Some(border) = self.find_border_at(mouse.column, mouse.row) {
                         self.drag = Some(DragState {
-                            path: border.path.clone(),
-                            direction: border.direction,
-                            area: border.area,
+                            target: DragTarget::PaneSplit {
+                                path: border.path.clone(),
+                                direction: border.direction,
+                                area: border.area,
+                            },
                         });
                         return None;
                     }
@@ -927,20 +956,32 @@ impl AppState {
 
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(drag) = &self.drag {
-                    let ratio = match drag.direction {
-                        Direction::Horizontal => {
-                            (mouse.column.saturating_sub(drag.area.x)) as f32
-                                / drag.area.width.max(1) as f32
+                    match &drag.target {
+                        DragTarget::PaneSplit {
+                            path,
+                            direction,
+                            area,
+                        } => {
+                            let ratio = match direction {
+                                Direction::Horizontal => {
+                                    (mouse.column.saturating_sub(area.x)) as f32
+                                        / area.width.max(1) as f32
+                                }
+                                Direction::Vertical => {
+                                    (mouse.row.saturating_sub(area.y)) as f32
+                                        / area.height.max(1) as f32
+                                }
+                            };
+                            let ratio = ratio.clamp(0.1, 0.9);
+                            let path = path.clone();
+                            if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
+                                ws.layout.set_ratio_at(&path, ratio);
+                            }
                         }
-                        Direction::Vertical => {
-                            (mouse.row.saturating_sub(drag.area.y)) as f32
-                                / drag.area.height.max(1) as f32
+                        DragTarget::SidebarDivider => {
+                            self.sidebar_width_auto = false;
+                            self.set_manual_sidebar_width(mouse.column);
                         }
-                    };
-                    let ratio = ratio.clamp(0.1, 0.9);
-                    let path = drag.path.clone();
-                    if let Some(ws) = self.active.and_then(|i| self.workspaces.get_mut(i)) {
-                        ws.layout.set_ratio_at(&path, ratio);
                     }
                 } else if let Some(sel) = &mut self.selection {
                     sel.drag(mouse.column, mouse.row);
@@ -1032,6 +1073,24 @@ impl AppState {
         }
 
         None
+    }
+
+    fn on_sidebar_divider(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        let sidebar = self.view.sidebar_rect;
+        sidebar.width > 0
+            && col == sidebar.x + sidebar.width.saturating_sub(1)
+            && row >= sidebar.y
+            && row < sidebar.y + sidebar.height
+    }
+
+    fn set_manual_sidebar_width(&mut self, divider_col: u16) {
+        let sidebar = self.view.sidebar_rect;
+        let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
+        self.sidebar_width =
+            width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
     }
 
     /// Find which workspace index a sidebar row belongs to (two-section layout).
@@ -1197,8 +1256,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::Workspace;
-    use crossterm::event::KeyModifiers;
+    use crate::{config::Config, workspace::Workspace};
+    use crossterm::event::{KeyModifiers, MouseEvent};
+    use ratatui::layout::Rect;
 
     fn state_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();
@@ -1209,6 +1269,30 @@ mod tests {
             state.mode = Mode::Navigate;
         }
         state
+    }
+
+    fn app_for_mouse_test() -> App {
+        let (_api_tx, api_rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.mode = Mode::Terminal;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+        app.state.view.terminal_area = Rect::new(26, 0, 80, 20);
+        app
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
     }
 
     #[test]
@@ -1364,5 +1448,30 @@ mod tests {
         assert_eq!(action, Some(SettingsAction::SaveSound(true)));
         assert!(state.sound.enabled);
         assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn dragging_sidebar_divider_sets_manual_width() {
+        let mut app = app_for_mouse_test();
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
+
+        assert!(!app.state.sidebar_width_auto);
+        assert_eq!(app.state.sidebar_width, 31);
+    }
+
+    #[test]
+    fn double_clicking_sidebar_divider_resets_auto_width() {
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_width_auto = false;
+        app.state.sidebar_width = 30;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 25, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 25, 5));
+
+        assert!(app.state.sidebar_width_auto);
+        assert!(app.state.drag.is_none());
     }
 }

@@ -12,6 +12,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::layout::Rect;
@@ -37,6 +38,7 @@ pub struct App {
     config_diagnostic_deadline: Option<Instant>,
     toast_deadline: Option<Instant>,
     last_git_remote_status_refresh: Instant,
+    last_sidebar_divider_click: Option<Instant>,
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -135,6 +137,7 @@ impl App {
             prefix_code,
             prefix_mods,
             sidebar_width: config.ui.sidebar_width,
+            sidebar_width_auto: true,
             sidebar_collapsed: false,
             confirm_close: config.ui.confirm_close,
             confirm_close_selected_confirm: true,
@@ -184,6 +187,7 @@ impl App {
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now(),
+            last_sidebar_divider_click: None,
             api_rx,
             event_hub,
             last_focus,
