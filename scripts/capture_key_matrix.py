@@ -5,6 +5,7 @@ Self-contained: copy this file to any macOS/Linux machine and run it with Python
 No project imports, no external dependencies.
 
 What it does:
+- auto-detects OS + tmux status
 - asks for terminal name + optional notes
 - prompts a fixed key matrix one key at a time
 - captures the raw byte sequence for each key press in raw mode
@@ -21,6 +22,8 @@ Exit / control:
 
 from __future__ import annotations
 
+import os
+import platform
 import re
 import select
 import sys
@@ -114,6 +117,19 @@ class RawMode:
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
 
 
+def detect_os() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macos"
+    if system == "linux":
+        return "linux"
+    return system or "unknown"
+
+
+def detect_tmux() -> str:
+    return "yes" if os.environ.get("TMUX") else "no"
+
+
 def prompt(text: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default else ""
     value = input(f"{text}{suffix}: ").strip()
@@ -122,9 +138,11 @@ def prompt(text: str, default: str | None = None) -> str:
     return value
 
 
-def choose_output_path(terminal_name: str) -> Path:
+def choose_output_path(terminal_name: str, os_name: str, tmux_state: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    default_name = f"key-capture-{sanitize(terminal_name)}-{stamp}.tsv"
+    default_name = (
+        f"key-capture-{sanitize(terminal_name)}-{sanitize(os_name)}-{sanitize(tmux_state)}-{stamp}.tsv"
+    )
     raw = prompt("Output file path", default_name)
     return Path(raw).expanduser().resolve()
 
@@ -153,12 +171,14 @@ def confirm_capture(data: bytes) -> str:
 def write_tsv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
-        f.write("terminal\tkey\tnotes\tbytes_hex\tescaped\n")
+        f.write("terminal\tos\ttmux\tkey\tnotes\tbytes_hex\tescaped\n")
         for row in rows:
             f.write(
                 "\t".join(
                     [
                         row["terminal"],
+                        row["os"],
+                        row["tmux"],
                         row["key"],
                         row["notes"],
                         row["bytes_hex"],
@@ -174,16 +194,21 @@ def main() -> int:
     print("This will collect one raw sequence per requested key and write a TSV file.")
     print()
 
+    os_name = detect_os()
+    tmux_state = detect_tmux()
+
     terminal_name = prompt("Terminal name (e.g. gnome-terminal, ghostty, kitty, iterm2)")
     if not terminal_name:
         print("Terminal name is required.", file=sys.stderr)
         return 1
 
-    notes = prompt("Optional notes (e.g. macos, tmux, ssh)", "")
-    output_path = choose_output_path(terminal_name)
+    notes = prompt("Optional notes", "")
+    output_path = choose_output_path(terminal_name, os_name, tmux_state)
 
     print()
     print(f"Terminal: {terminal_name}")
+    print(f"OS:       {os_name}")
+    print(f"Tmux:     {tmux_state}")
     print(f"Notes:    {notes or '-'}")
     print(f"Output:   {output_path}")
     print()
@@ -207,6 +232,8 @@ def main() -> int:
                 rows.append(
                     {
                         "terminal": terminal_name,
+                        "os": os_name,
+                        "tmux": tmux_state,
                         "key": key_id,
                         "notes": notes,
                         "bytes_hex": "",
@@ -222,6 +249,8 @@ def main() -> int:
             rows.append(
                 {
                     "terminal": terminal_name,
+                    "os": os_name,
+                    "tmux": tmux_state,
                     "key": key_id,
                     "notes": notes,
                     "bytes_hex": to_hex(data),

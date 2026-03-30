@@ -11,6 +11,7 @@ pub mod state;
 use std::io;
 use std::time::{Duration, Instant};
 
+const RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
@@ -41,6 +42,14 @@ pub struct App {
     toast_deadline: Option<Instant>,
     last_git_remote_status_refresh: Instant,
     last_sidebar_divider_click: Option<Instant>,
+}
+
+enum LoopEvent {
+    RenderTick,
+    Internal(AppEvent),
+    RawInput(crate::raw_input::RawInputEvent),
+    InputClosed,
+    Idle,
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -204,59 +213,89 @@ impl App {
             self.input_rx = Some(crate::raw_input::spawn_input_reader());
         }
 
+        let mut render_tick = tokio::time::interval(RENDER_INTERVAL);
+        render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut needs_render = true;
+
         while !self.state.should_quit {
-            if self
-                .config_diagnostic_deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                self.config_diagnostic_deadline = None;
-                self.state.config_diagnostic = None;
-            }
-
-            if self
-                .toast_deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                self.toast_deadline = None;
-                self.state.toast = None;
-            }
-
-            self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
-
-            if self.last_git_remote_status_refresh.elapsed() >= GIT_REMOTE_STATUS_REFRESH_INTERVAL {
-                for ws in &mut self.state.workspaces {
-                    ws.refresh_git_ahead_behind();
-                }
-                self.last_git_remote_status_refresh = Instant::now();
-            }
-
-            terminal.draw(|frame| {
-                crate::ui::compute_view(&mut self.state, frame.area());
-                crate::ui::render(&self.state, frame);
-            })?;
-
             // Drain internal events first so API reads observe fresh pane state.
-            self.drain_internal_events();
+            let had_internal_events = self.drain_internal_events();
 
+            let mut had_api_requests = false;
             while let Ok(msg) = self.api_rx.try_recv() {
+                had_api_requests = true;
                 let response = self.handle_api_request(msg.request);
                 let _ = msg.respond_to.send(response);
             }
 
+            if had_internal_events || had_api_requests {
+                needs_render = true;
+            }
+
             self.sync_focus_events();
             self.handle_resize_poll();
-            self.drain_raw_input().await;
-
-            tokio::time::sleep(Duration::from_millis(16)).await;
+            if self.handle_frame_timers() {
+                needs_render = true;
+            }
 
             if self.state.request_complete_onboarding {
                 self.state.request_complete_onboarding = false;
                 self.complete_onboarding();
+                needs_render = true;
             }
 
             if self.state.request_new_workspace {
                 self.state.request_new_workspace = false;
                 self.create_workspace();
+                needs_render = true;
+            }
+
+            if needs_render {
+                terminal.draw(|frame| {
+                    crate::ui::compute_view(&mut self.state, frame.area());
+                    crate::ui::render(&self.state, frame);
+                })?;
+                needs_render = false;
+                continue;
+            }
+
+            let event = {
+                let input_rx = self.input_rx.as_mut();
+                tokio::select! {
+                    _ = render_tick.tick() => LoopEvent::RenderTick,
+                    maybe_ev = self.event_rx.recv() => match maybe_ev {
+                        Some(ev) => LoopEvent::Internal(ev),
+                        None => LoopEvent::Idle,
+                    },
+                    maybe_input = async {
+                        match input_rx {
+                            Some(rx) => rx.recv().await,
+                            None => None,
+                        }
+                    } => match maybe_input {
+                        Some(input) => LoopEvent::RawInput(input),
+                        None => LoopEvent::InputClosed,
+                    },
+                }
+            };
+
+            match event {
+                LoopEvent::RenderTick => {
+                    self.state.spinner_tick = self.state.spinner_tick.wrapping_add(1);
+                    needs_render = true;
+                }
+                LoopEvent::Internal(ev) => {
+                    self.handle_internal_event(ev);
+                    needs_render = true;
+                }
+                LoopEvent::RawInput(input) => {
+                    self.handle_raw_input_event(input).await;
+                    needs_render = true;
+                }
+                LoopEvent::InputClosed => {
+                    self.input_rx = None;
+                }
+                LoopEvent::Idle => {}
             }
         }
 
@@ -273,23 +312,16 @@ impl App {
         Ok(())
     }
 
-    async fn drain_raw_input(&mut self) {
-        while let Some(rx) = self.input_rx.as_mut() {
-            match rx.try_recv() {
-                Ok(crate::raw_input::RawInputEvent::Key(key)) => {
-                    if key.kind == crossterm::event::KeyEventKind::Press {
-                        self.handle_key(key).await;
-                    }
-                }
-                Ok(crate::raw_input::RawInputEvent::Paste(text)) => self.handle_paste(text).await,
-                Ok(crate::raw_input::RawInputEvent::Mouse(mouse)) => self.handle_mouse(mouse),
-                Ok(crate::raw_input::RawInputEvent::Unsupported) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    self.input_rx = None;
-                    break;
+    async fn handle_raw_input_event(&mut self, event: crate::raw_input::RawInputEvent) {
+        match event {
+            crate::raw_input::RawInputEvent::Key(key) => {
+                if key.kind == crossterm::event::KeyEventKind::Press {
+                    self.handle_key(key).await;
                 }
             }
+            crate::raw_input::RawInputEvent::Paste(text) => self.handle_paste(text).await,
+            crate::raw_input::RawInputEvent::Mouse(mouse) => self.handle_mouse(mouse),
+            crate::raw_input::RawInputEvent::Unsupported => {}
         }
     }
 
@@ -300,67 +332,106 @@ impl App {
         }
     }
 
-    fn drain_internal_events(&mut self) {
+    fn handle_frame_timers(&mut self) -> bool {
+        let mut changed = false;
+
+        if self
+            .config_diagnostic_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.config_diagnostic_deadline = None;
+            self.state.config_diagnostic = None;
+            changed = true;
+        }
+
+        if self
+            .toast_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.toast_deadline = None;
+            self.state.toast = None;
+            changed = true;
+        }
+
+        if self.last_git_remote_status_refresh.elapsed() >= GIT_REMOTE_STATUS_REFRESH_INTERVAL {
+            for ws in &mut self.state.workspaces {
+                ws.refresh_git_ahead_behind();
+            }
+            self.last_git_remote_status_refresh = Instant::now();
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn drain_internal_events(&mut self) -> bool {
+        let mut had_event = false;
         while let Ok(ev) = self.event_rx.try_recv() {
-            match &ev {
-                AppEvent::PaneDied { pane_id } => {
-                    if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
-                        if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+            had_event = true;
+            self.handle_internal_event(ev);
+        }
+        had_event
+    }
+
+    fn handle_internal_event(&mut self, ev: AppEvent) {
+        match &ev {
+            AppEvent::PaneDied { pane_id } => {
+                if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
+                    if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneExited,
+                            data: crate::api::schema::EventData::PaneExited {
+                                pane_id: public_pane_id,
+                                workspace_id: self.public_workspace_id(ws_idx),
+                            },
+                        });
+                    }
+                }
+            }
+            AppEvent::StateChanged {
+                pane_id,
+                agent,
+                state,
+            } => {
+                if let Some((ws_idx, pane)) = self.find_pane(*pane_id) {
+                    if let Some(pane_id) = self.public_pane_id(ws_idx, *pane_id) {
+                        let workspace_id = self.public_workspace_id(ws_idx);
+                        if pane.detected_agent != *agent {
                             self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::PaneExited,
-                                data: crate::api::schema::EventData::PaneExited {
-                                    pane_id: public_pane_id,
-                                    workspace_id: self.public_workspace_id(ws_idx),
+                                event: crate::api::schema::EventKind::PaneAgentDetected,
+                                data: crate::api::schema::EventData::PaneAgentDetected {
+                                    pane_id: pane_id.clone(),
+                                    workspace_id: workspace_id.clone(),
+                                    agent: agent.map(agent_name),
+                                },
+                            });
+                        }
+                        if pane.state != *state {
+                            self.emit_event(crate::api::schema::EventEnvelope {
+                                event: crate::api::schema::EventKind::PaneAgentStateChanged,
+                                data: crate::api::schema::EventData::PaneAgentStateChanged {
+                                    pane_id,
+                                    workspace_id,
+                                    state: pane_agent_state(*state),
                                 },
                             });
                         }
                     }
                 }
-                AppEvent::StateChanged {
-                    pane_id,
-                    agent,
-                    state,
-                } => {
-                    if let Some((ws_idx, pane)) = self.find_pane(*pane_id) {
-                        if let Some(pane_id) = self.public_pane_id(ws_idx, *pane_id) {
-                            let workspace_id = self.public_workspace_id(ws_idx);
-                            if pane.detected_agent != *agent {
-                                self.emit_event(crate::api::schema::EventEnvelope {
-                                    event: crate::api::schema::EventKind::PaneAgentDetected,
-                                    data: crate::api::schema::EventData::PaneAgentDetected {
-                                        pane_id: pane_id.clone(),
-                                        workspace_id: workspace_id.clone(),
-                                        agent: agent.map(agent_name),
-                                    },
-                                });
-                            }
-                            if pane.state != *state {
-                                self.emit_event(crate::api::schema::EventEnvelope {
-                                    event: crate::api::schema::EventKind::PaneAgentStateChanged,
-                                    data: crate::api::schema::EventData::PaneAgentStateChanged {
-                                        pane_id,
-                                        workspace_id,
-                                        state: pane_agent_state(*state),
-                                    },
-                                });
-                            }
-                        }
-                    }
-                }
-                AppEvent::UpdateReady { .. } => {}
             }
+            AppEvent::UpdateReady { .. } => {}
+        }
 
-            let previous_toast = self.state.toast.clone();
-            self.state.handle_app_event(ev);
-            if self.state.toast != previous_toast {
-                self.toast_deadline = self.state.toast.as_ref().map(|toast| {
-                    let duration = match toast.kind {
-                        ToastKind::NeedsAttention => Duration::from_secs(8),
-                        ToastKind::Finished => Duration::from_secs(5),
-                    };
-                    Instant::now() + duration
-                });
-            }
+        let previous_toast = self.state.toast.clone();
+        self.state.handle_app_event(ev);
+        if self.state.toast != previous_toast {
+            self.toast_deadline = self.state.toast.as_ref().map(|toast| {
+                let duration = match toast.kind {
+                    ToastKind::NeedsAttention => Duration::from_secs(8),
+                    ToastKind::Finished => Duration::from_secs(5),
+                };
+                Instant::now() + duration
+            });
         }
     }
 
