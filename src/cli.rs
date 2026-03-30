@@ -530,7 +530,7 @@ fn wait_output(args: &[String]) -> std::io::Result<i32> {
 
 fn wait_agent_state(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr wait agent-state <pane_id> --state <idle|busy|waiting|unknown> [--timeout MS]");
+        eprintln!("usage: herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]");
         return Ok(2);
     };
 
@@ -692,11 +692,11 @@ fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
 fn parse_agent_state(value: &str) -> std::io::Result<PaneAgentState> {
     match value {
         "idle" => Ok(PaneAgentState::Idle),
-        "busy" => Ok(PaneAgentState::Busy),
-        "waiting" => Ok(PaneAgentState::Waiting),
+        "working" => Ok(PaneAgentState::Working),
+        "blocked" => Ok(PaneAgentState::Blocked),
         "unknown" => Ok(PaneAgentState::Unknown),
         _ => Err(std::io::Error::other(format!(
-            "invalid agent state: {value}"
+            "invalid agent state: {value} (expected idle, working, blocked, or unknown)"
         ))),
     }
 }
@@ -739,7 +739,7 @@ fn print_wait_help() {
     eprintln!("herdr wait commands:");
     eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent] [--lines N] [--timeout MS] [--regex]");
     eprintln!(
-        "  herdr wait agent-state <pane_id> --state <idle|busy|waiting|unknown> [--timeout MS]"
+        "  herdr wait agent-state <pane_id> --state <idle|working|blocked|unknown> [--timeout MS]"
     );
 }
 

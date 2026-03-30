@@ -1158,8 +1158,8 @@ fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
 fn pane_agent_state(state: crate::detect::AgentState) -> crate::api::schema::PaneAgentState {
     match state {
         crate::detect::AgentState::Idle => crate::api::schema::PaneAgentState::Idle,
-        crate::detect::AgentState::Busy => crate::api::schema::PaneAgentState::Busy,
-        crate::detect::AgentState::Waiting => crate::api::schema::PaneAgentState::Waiting,
+        crate::detect::AgentState::Working => crate::api::schema::PaneAgentState::Working,
+        crate::detect::AgentState::Blocked => crate::api::schema::PaneAgentState::Blocked,
         crate::detect::AgentState::Unknown => crate::api::schema::PaneAgentState::Unknown,
     }
 }

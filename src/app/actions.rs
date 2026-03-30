@@ -19,7 +19,7 @@ fn notification_sound_for_state_change(
     }
 
     match new_state {
-        AgentState::Waiting => Some(crate::sound::Sound::Request),
+        AgentState::Blocked => Some(crate::sound::Sound::Request),
         AgentState::Idle if prev_state != AgentState::Idle && !is_active_ws => {
             Some(crate::sound::Sound::Done)
         }
@@ -37,7 +37,7 @@ fn notification_toast_for_state_change(
     }
 
     match new_state {
-        AgentState::Waiting => Some(ToastKind::NeedsAttention),
+        AgentState::Blocked => Some(ToastKind::NeedsAttention),
         AgentState::Idle if prev_state != AgentState::Idle => Some(ToastKind::Finished),
         _ => None,
     }
@@ -219,7 +219,7 @@ impl AppState {
                             pane.seen = false;
                         }
 
-                        // Waiting prompts should always make noise; done sounds stay background-only.
+                        // Blocked prompts should always make noise; done sounds stay background-only.
                         if self.sound.allows(agent) {
                             if let Some(sound) =
                                 notification_sound_for_state_change(is_active_ws, prev_state, state)
@@ -435,11 +435,11 @@ mod tests {
         state.handle_app_event(AppEvent::StateChanged {
             pane_id,
             agent: Some(Agent::Pi),
-            state: AgentState::Busy,
+            state: AgentState::Working,
         });
 
         let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
-        assert_eq!(pane.state, AgentState::Busy);
+        assert_eq!(pane.state, AgentState::Working);
         assert_eq!(pane.detected_agent, Some(Agent::Pi));
     }
 
@@ -449,12 +449,12 @@ mod tests {
         state.active = Some(0);
         let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
 
-        // First set it to Busy
+        // First set it to Working
         state.workspaces[1]
             .panes
             .get_mut(&bg_pane_id)
             .unwrap()
-            .state = AgentState::Busy;
+            .state = AgentState::Working;
 
         // Now transition to Idle while in background
         state.handle_app_event(AppEvent::StateChanged {
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn waiting_sound_plays_even_in_active_workspace() {
         assert_eq!(
-            notification_sound_for_state_change(true, AgentState::Busy, AgentState::Waiting),
+            notification_sound_for_state_change(true, AgentState::Working, AgentState::Blocked),
             Some(crate::sound::Sound::Request)
         );
     }
@@ -478,11 +478,11 @@ mod tests {
     #[test]
     fn done_sound_only_plays_in_background() {
         assert_eq!(
-            notification_sound_for_state_change(false, AgentState::Busy, AgentState::Idle),
+            notification_sound_for_state_change(false, AgentState::Working, AgentState::Idle),
             Some(crate::sound::Sound::Done)
         );
         assert_eq!(
-            notification_sound_for_state_change(true, AgentState::Busy, AgentState::Idle),
+            notification_sound_for_state_change(true, AgentState::Working, AgentState::Idle),
             None
         );
     }
@@ -497,7 +497,7 @@ mod tests {
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
             agent: Some(Agent::Pi),
-            state: AgentState::Waiting,
+            state: AgentState::Blocked,
         });
 
         let toast = state.toast.as_ref().unwrap();
@@ -516,7 +516,7 @@ mod tests {
             .panes
             .get_mut(&bg_pane_id)
             .unwrap()
-            .state = AgentState::Busy;
+            .state = AgentState::Working;
 
         state.handle_app_event(AppEvent::StateChanged {
             pane_id: bg_pane_id,
@@ -540,7 +540,7 @@ mod tests {
         state.handle_app_event(AppEvent::StateChanged {
             pane_id,
             agent: Some(Agent::Pi),
-            state: AgentState::Waiting,
+            state: AgentState::Blocked,
         });
 
         assert!(state.toast.is_none());

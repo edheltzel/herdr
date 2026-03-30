@@ -9,9 +9,9 @@ pub enum AgentState {
     /// Agent finished, prompt visible, nothing happening.
     Idle,
     /// Agent is actively working/processing.
-    Busy,
-    /// Agent needs human input — approval, question, error.
-    Waiting,
+    Working,
+    /// Agent needs human input and is blocked on a response.
+    Blocked,
     /// Plain shell or unrecognized program.
     Unknown,
 }
@@ -23,8 +23,8 @@ impl AgentState {
         match self {
             Self::Unknown => 0,
             Self::Idle => 1,
-            Self::Busy => 2,
-            Self::Waiting => 3,
+            Self::Working => 2,
+            Self::Blocked => 3,
         }
     }
 }
@@ -123,7 +123,7 @@ pub fn workspace_state(pane_states: &[AgentState]) -> AgentState {
 fn detect_pi(content: &str) -> AgentState {
     // pi shows "Working..." when the agent is processing
     if content.contains("Working...") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
     AgentState::Idle
 }
@@ -151,34 +151,34 @@ fn detect_claude(content: &str) -> AgentState {
         return AgentState::Idle;
     }
 
-    // --- Waiting detection (full content including prompt box) ---
+    // --- Blocked detection (full content including prompt box) ---
 
     // "Do you want" or "Would you like" followed by yes/❯
     if has_confirmation_prompt(&lower) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
     // Selection prompt: ❯ followed by numbered option
     if has_selection_prompt(content) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
     // "esc to cancel" indicates permission/confirmation dialog
     if lower.contains("esc to cancel") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // --- Busy detection (content above the prompt box) ---
+    // --- Working detection (content above the prompt box) ---
 
     let above = content_above_prompt_box(content);
     let above_lower = above.to_lowercase();
 
     if above_lower.contains("esc to interrupt") || above_lower.contains("ctrl+c to interrupt") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     if has_spinner_activity(above) {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -187,22 +187,22 @@ fn detect_claude(content: &str) -> AgentState {
 fn detect_codex(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting patterns
+    // Blocked patterns
     if lower.contains("press enter to confirm or esc to cancel")
         || lower.contains("| enter to submit answer")
         || lower.contains("allow command?")
         || lower.contains("[y/n]")
         || lower.contains("yes (y)")
     {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     if has_confirmation_prompt(&lower) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if has_interrupt_pattern(&lower) {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -211,25 +211,25 @@ fn detect_codex(content: &str) -> AgentState {
 fn detect_gemini(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting — explicit confirmation
+    // Blocked — explicit confirmation
     if lower.contains("waiting for user confirmation") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Waiting — box-drawing confirmation prompts
+    // Blocked — box-drawing confirmation prompts
     if content.contains("│ Apply this change")
         || content.contains("│ Allow execution")
         || content.contains("│ Do you want to proceed")
     {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     if has_confirmation_prompt(&lower) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if lower.contains("esc to cancel") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -238,24 +238,24 @@ fn detect_gemini(content: &str) -> AgentState {
 fn detect_cursor(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting
+    // Blocked
     if lower.contains("(y) (enter)")
         || lower.contains("keep (n)")
         || lower.contains("skip (esc or n)")
     {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     // "allow ...(y)" or "run ...(y)" patterns
     if lower.contains("(y)") && (lower.contains("allow") || lower.contains("run")) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if lower.contains("ctrl+c to stop") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
     if has_cursor_spinner(content) {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -264,13 +264,13 @@ fn detect_cursor(content: &str) -> AgentState {
 fn detect_cline(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting
+    // Blocked
     if lower.contains("let cline use this tool") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     // [act mode] or [plan mode] followed by "yes"
     if (lower.contains("[act mode]") || lower.contains("[plan mode]")) && lower.contains("yes") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
     // Idle
@@ -278,19 +278,19 @@ fn detect_cline(content: &str) -> AgentState {
         return AgentState::Idle;
     }
 
-    // Cline defaults to busy (unlike most agents that default to idle)
-    AgentState::Busy
+    // Cline defaults to working (unlike most agents that default to idle)
+    AgentState::Working
 }
 
 fn detect_opencode(content: &str) -> AgentState {
-    // Waiting
+    // Blocked
     if content.contains("△ Permission required") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if has_interrupt_pattern(&content.to_lowercase()) {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -299,17 +299,17 @@ fn detect_opencode(content: &str) -> AgentState {
 fn detect_github_copilot(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting
+    // Blocked
     if lower.contains("│ do you want") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     if lower.contains("confirm with") && lower.contains("enter") {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if lower.contains("esc to cancel") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -318,7 +318,7 @@ fn detect_github_copilot(content: &str) -> AgentState {
 fn detect_kimi(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting
+    // Blocked
     if lower.contains("allow?")
         || lower.contains("confirm?")
         || lower.contains("approve?")
@@ -326,10 +326,10 @@ fn detect_kimi(content: &str) -> AgentState {
         || lower.contains("[y/n]")
         || lower.contains("(y/n)")
     {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy
+    // Working
     if lower.contains("thinking")
         || lower.contains("processing")
         || lower.contains("generating")
@@ -337,7 +337,7 @@ fn detect_kimi(content: &str) -> AgentState {
         || lower.contains("ctrl+c to cancel")
         || lower.contains("ctrl-c to cancel")
     {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -345,14 +345,14 @@ fn detect_kimi(content: &str) -> AgentState {
 
 /// Droid detection.
 ///
-/// Busy: braille spinner line (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) + "Thinking..." + "(Press ESC to stop)"
-/// Waiting: EXECUTE prompt with selection box ("Yes, allow" / "No, cancel") +
+/// Working: braille spinner line (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) + "Thinking..." + "(Press ESC to stop)"
+/// Blocked: EXECUTE prompt with selection box ("Yes, allow" / "No, cancel") +
 ///          "Use ↑↓ to navigate, Enter to select"
 /// Idle: prompt box visible, no spinner, no selection prompt
 fn detect_droid(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Waiting: EXECUTE approval prompt with selection UI chrome
+    // Blocked: EXECUTE approval prompt with selection UI chrome
     // Primary (AND): structural keyword + chrome text = certain
     let has_execute = content.contains("EXECUTE");
     let has_selection_chrome = lower.contains("enter to select")
@@ -361,21 +361,21 @@ fn detect_droid(content: &str) -> AgentState {
     let has_selection_options = lower.contains("> yes, allow") || lower.contains("> no, cancel");
 
     if has_execute && (has_selection_chrome || has_selection_options) {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
     // Secondary: selection chrome + options together (no EXECUTE needed)
     if has_selection_chrome && has_selection_options {
-        return AgentState::Waiting;
+        return AgentState::Blocked;
     }
 
-    // Busy: braille spinner character at start of a line + "Thinking..."
+    // Working: braille spinner character at start of a line + "Thinking..."
     // The braille chars (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) are very specific — won't appear in normal content
     if has_braille_spinner(content) && lower.contains("esc to stop") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
     // Fallback: "ESC to stop" alone is still a strong signal (it's UI chrome)
     if lower.contains("esc to stop") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -383,20 +383,20 @@ fn detect_droid(content: &str) -> AgentState {
 
 /// Amp (Sourcegraph) detection.
 ///
-/// Screen layout when busy:
+/// Screen layout when working:
 /// ```text
 ///   ✓ Search Map the core runtime architecture...
 ///   ⋯ Oracle ▼
 ///   ≈ Running tools...         Esc to cancel
 /// ```
 ///
-/// "Esc to cancel" is the reliable busy indicator — it only appears
+/// "Esc to cancel" is the reliable working indicator — it only appears
 /// while amp is actively running tools or thinking.
 fn detect_amp(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
     if lower.contains("esc to cancel") {
-        return AgentState::Busy;
+        return AgentState::Working;
     }
 
     AgentState::Idle
@@ -623,15 +623,15 @@ mod tests {
     // ---- Workspace state rollup ----
 
     #[test]
-    fn workspace_state_waiting_wins() {
-        let states = [AgentState::Idle, AgentState::Busy, AgentState::Waiting];
-        assert_eq!(workspace_state(&states), AgentState::Waiting);
+    fn workspace_state_blocked_wins() {
+        let states = [AgentState::Idle, AgentState::Working, AgentState::Blocked];
+        assert_eq!(workspace_state(&states), AgentState::Blocked);
     }
 
     #[test]
-    fn workspace_state_busy_over_idle() {
-        let states = [AgentState::Idle, AgentState::Busy, AgentState::Unknown];
-        assert_eq!(workspace_state(&states), AgentState::Busy);
+    fn workspace_state_working_over_idle() {
+        let states = [AgentState::Idle, AgentState::Working, AgentState::Unknown];
+        assert_eq!(workspace_state(&states), AgentState::Working);
     }
 
     #[test]
@@ -649,13 +649,13 @@ mod tests {
     // ---- Pi ----
 
     #[test]
-    fn pi_busy_when_working() {
-        assert_eq!(detect_pi("some output\nWorking..."), AgentState::Busy);
+    fn pi_working_when_working() {
+        assert_eq!(detect_pi("some output\nWorking..."), AgentState::Working);
     }
 
     #[test]
-    fn pi_busy_working_in_middle() {
-        assert_eq!(detect_pi("line1\nWorking...\nline3"), AgentState::Busy);
+    fn pi_working_working_in_middle() {
+        assert_eq!(detect_pi("line1\nWorking...\nline3"), AgentState::Working);
     }
 
     #[test]
@@ -671,51 +671,51 @@ mod tests {
     // ---- Claude Code ----
 
     #[test]
-    fn claude_busy_esc_to_interrupt() {
+    fn claude_working_esc_to_interrupt() {
         let screen = "Reading file src/main.rs\nesc to interrupt\n─────────\n❯ \n─────────";
-        assert_eq!(detect_claude(screen), AgentState::Busy);
+        assert_eq!(detect_claude(screen), AgentState::Working);
     }
 
     #[test]
-    fn claude_busy_ctrl_c_to_interrupt() {
+    fn claude_working_ctrl_c_to_interrupt() {
         let screen = "Editing code\nctrl+c to interrupt\n─────────\n❯ \n─────────";
-        assert_eq!(detect_claude(screen), AgentState::Busy);
+        assert_eq!(detect_claude(screen), AgentState::Working);
     }
 
     #[test]
-    fn claude_busy_spinner() {
+    fn claude_working_spinner() {
         let screen = "✽ Tempering…\n─────────\n❯ \n─────────";
-        assert_eq!(detect_claude(screen), AgentState::Busy);
+        assert_eq!(detect_claude(screen), AgentState::Working);
     }
 
     #[test]
-    fn claude_busy_spinner_with_detail() {
+    fn claude_working_spinner_with_detail() {
         let screen = "✳ Simplifying recompute_tangents…\n─────────\n❯ \n─────────";
-        assert_eq!(detect_claude(screen), AgentState::Busy);
+        assert_eq!(detect_claude(screen), AgentState::Working);
     }
 
     #[test]
     fn claude_waiting_do_you_want() {
         let screen = "Do you want to run this command?\n\nYes  No";
-        assert_eq!(detect_claude(screen), AgentState::Waiting);
+        assert_eq!(detect_claude(screen), AgentState::Blocked);
     }
 
     #[test]
     fn claude_waiting_would_you_like() {
         let screen = "Would you like to apply these changes?\n\n❯ Yes";
-        assert_eq!(detect_claude(screen), AgentState::Waiting);
+        assert_eq!(detect_claude(screen), AgentState::Blocked);
     }
 
     #[test]
     fn claude_waiting_selection_prompt() {
         let screen = "Choose an option:\n❯ 1. Apply\n  2. Skip\n  3. Cancel";
-        assert_eq!(detect_claude(screen), AgentState::Waiting);
+        assert_eq!(detect_claude(screen), AgentState::Blocked);
     }
 
     #[test]
     fn claude_waiting_esc_to_cancel() {
         let screen = "Allow bash: rm -rf /tmp/test?\n\nesc to cancel";
-        assert_eq!(detect_claude(screen), AgentState::Waiting);
+        assert_eq!(detect_claude(screen), AgentState::Blocked);
     }
 
     #[test]
@@ -731,10 +731,10 @@ mod tests {
     }
 
     #[test]
-    fn claude_busy_not_confused_by_old_prompt() {
-        // The "esc to interrupt" is ABOVE the prompt box — should be busy
+    fn claude_working_not_confused_by_old_prompt() {
+        // The "esc to interrupt" is ABOVE the prompt box — should be working
         let screen = "✽ Writing…\nesc to interrupt\n──────\n❯ \n──────";
-        assert_eq!(detect_claude(screen), AgentState::Busy);
+        assert_eq!(detect_claude(screen), AgentState::Working);
     }
 
     // ---- Codex ----
@@ -743,28 +743,28 @@ mod tests {
     fn codex_waiting_confirm() {
         assert_eq!(
             detect_codex("press enter to confirm or esc to cancel"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
     fn codex_waiting_allow_command() {
-        assert_eq!(detect_codex("allow command?\n[y/n]"), AgentState::Waiting);
+        assert_eq!(detect_codex("allow command?\n[y/n]"), AgentState::Blocked);
     }
 
     #[test]
     fn codex_waiting_submit_answer() {
         assert_eq!(
             detect_codex("Question about approach\n| enter to submit answer"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
-    fn codex_busy_interrupt() {
+    fn codex_working_interrupt() {
         assert_eq!(
             detect_codex("generating code\nesc to interrupt"),
-            AgentState::Busy
+            AgentState::Working
         );
     }
 
@@ -779,7 +779,7 @@ mod tests {
     fn gemini_waiting_confirmation() {
         assert_eq!(
             detect_gemini("waiting for user confirmation"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
@@ -787,7 +787,7 @@ mod tests {
     fn gemini_waiting_apply() {
         assert_eq!(
             detect_gemini("│ Apply this change\n│ Yes  │ No"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
@@ -795,15 +795,15 @@ mod tests {
     fn gemini_waiting_allow_execution() {
         assert_eq!(
             detect_gemini("│ Allow execution of: rm test.txt"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
-    fn gemini_busy() {
+    fn gemini_working() {
         assert_eq!(
             detect_gemini("thinking...\nesc to cancel"),
-            AgentState::Busy
+            AgentState::Working
         );
     }
 
@@ -818,25 +818,25 @@ mod tests {
     fn cursor_waiting_accept() {
         assert_eq!(
             detect_cursor("Apply changes? (y) (enter) or keep (n)"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
     fn cursor_waiting_allow() {
-        assert_eq!(detect_cursor("allow file edit (y)"), AgentState::Waiting);
+        assert_eq!(detect_cursor("allow file edit (y)"), AgentState::Blocked);
     }
 
     #[test]
-    fn cursor_busy_spinner() {
-        assert_eq!(detect_cursor("⬡ Grepping.."), AgentState::Busy);
+    fn cursor_working_spinner() {
+        assert_eq!(detect_cursor("⬡ Grepping.."), AgentState::Working);
     }
 
     #[test]
-    fn cursor_busy_ctrl_c() {
+    fn cursor_working_ctrl_c() {
         assert_eq!(
             detect_cursor("processing\nctrl+c to stop"),
-            AgentState::Busy
+            AgentState::Working
         );
     }
 
@@ -849,14 +849,14 @@ mod tests {
 
     #[test]
     fn cline_waiting_tool_use() {
-        assert_eq!(detect_cline("let cline use this tool"), AgentState::Waiting);
+        assert_eq!(detect_cline("let cline use this tool"), AgentState::Blocked);
     }
 
     #[test]
     fn cline_waiting_act_mode() {
         assert_eq!(
             detect_cline("[act mode] execute command?\nyes"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
@@ -869,9 +869,9 @@ mod tests {
     }
 
     #[test]
-    fn cline_defaults_to_busy() {
-        // Cline's default is busy (unlike other agents)
-        assert_eq!(detect_cline("some random output"), AgentState::Busy);
+    fn cline_defaults_to_working() {
+        // Cline's default is working (unlike other agents)
+        assert_eq!(detect_cline("some random output"), AgentState::Working);
     }
 
     // ---- OpenCode ----
@@ -880,15 +880,15 @@ mod tests {
     fn opencode_waiting_permission() {
         assert_eq!(
             detect_opencode("△ Permission required"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
-    fn opencode_busy() {
+    fn opencode_working() {
         assert_eq!(
             detect_opencode("running tool\nesc to interrupt"),
-            AgentState::Busy
+            AgentState::Working
         );
     }
 
@@ -903,7 +903,7 @@ mod tests {
     fn copilot_waiting_confirm() {
         assert_eq!(
             detect_github_copilot("confirm with enter"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
@@ -911,15 +911,15 @@ mod tests {
     fn copilot_waiting_do_you_want() {
         assert_eq!(
             detect_github_copilot("│ do you want to apply?"),
-            AgentState::Waiting
+            AgentState::Blocked
         );
     }
 
     #[test]
-    fn copilot_busy() {
+    fn copilot_working() {
         assert_eq!(
             detect_github_copilot("generating\nesc to cancel"),
-            AgentState::Busy
+            AgentState::Working
         );
     }
 
@@ -932,22 +932,22 @@ mod tests {
 
     #[test]
     fn kimi_waiting_approve() {
-        assert_eq!(detect_kimi("approve?"), AgentState::Waiting);
+        assert_eq!(detect_kimi("approve?"), AgentState::Blocked);
     }
 
     #[test]
     fn kimi_waiting_yn() {
-        assert_eq!(detect_kimi("continue? [y/n]"), AgentState::Waiting);
+        assert_eq!(detect_kimi("continue? [y/n]"), AgentState::Blocked);
     }
 
     #[test]
-    fn kimi_busy_thinking() {
-        assert_eq!(detect_kimi("thinking"), AgentState::Busy);
+    fn kimi_working_thinking() {
+        assert_eq!(detect_kimi("thinking"), AgentState::Working);
     }
 
     #[test]
-    fn kimi_busy_generating() {
-        assert_eq!(detect_kimi("generating code"), AgentState::Busy);
+    fn kimi_working_generating() {
+        assert_eq!(detect_kimi("generating code"), AgentState::Working);
     }
 
     #[test]
@@ -958,16 +958,16 @@ mod tests {
     // ---- Droid ----
 
     #[test]
-    fn droid_busy_thinking_with_spinner() {
+    fn droid_working_thinking_with_spinner() {
         let screen = ">  how u doin\n\n⠴ Thinking...  (Press ESC to stop)\n\nAuto (Off)";
-        assert_eq!(detect_droid(screen), AgentState::Busy);
+        assert_eq!(detect_droid(screen), AgentState::Working);
     }
 
     #[test]
-    fn droid_busy_esc_to_stop_alone() {
-        // ESC to stop without spinner is still busy (UI chrome)
+    fn droid_working_esc_to_stop_alone() {
+        // ESC to stop without spinner is still working (UI chrome)
         let screen = "Processing\n(Press ESC to stop)";
-        assert_eq!(detect_droid(screen), AgentState::Busy);
+        assert_eq!(detect_droid(screen), AgentState::Working);
     }
 
     #[test]
@@ -982,18 +982,18 @@ mod tests {
             "╰────────────────────╯\n",
             "   Use ↑↓ to navigate, Enter to select, Esc to cancel\n",
         );
-        assert_eq!(detect_droid(screen), AgentState::Waiting);
+        assert_eq!(detect_droid(screen), AgentState::Blocked);
     }
 
     #[test]
     fn droid_waiting_selection_with_chrome() {
         let screen = "│ > Yes, allow │\n│   No, cancel │\n   Use ↑↓ to navigate, Enter to select, Esc to cancel";
-        assert_eq!(detect_droid(screen), AgentState::Waiting);
+        assert_eq!(detect_droid(screen), AgentState::Blocked);
     }
 
     #[test]
     fn droid_not_waiting_on_options_text_alone() {
-        // "Yes, allow" in normal conversation should NOT trigger waiting
+        // "Yes, allow" in normal conversation should NOT trigger blocked
         let screen = "The user said > Yes, allow the changes";
         assert_eq!(detect_droid(screen), AgentState::Idle);
     }
@@ -1034,9 +1034,9 @@ mod tests {
     // ---- Amp ----
 
     #[test]
-    fn amp_busy_running_tools() {
+    fn amp_working_running_tools() {
         let screen = "  ✓ Search Map the core runtime architecture\n  ⋯ Oracle ▼\n  ≈ Running tools...         Esc to cancel";
-        assert_eq!(detect_state(Some(Agent::Amp), screen), AgentState::Busy);
+        assert_eq!(detect_state(Some(Agent::Amp), screen), AgentState::Working);
     }
 
     #[test]
@@ -1224,7 +1224,7 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 0);
         parser.process(b"Working...");
         let content = parser.screen().contents();
-        assert_eq!(detect_pi(&content), AgentState::Busy);
+        assert_eq!(detect_pi(&content), AgentState::Working);
     }
 
     #[test]
@@ -1233,7 +1233,7 @@ mod tests {
         // Red "Working..." with ANSI codes — contents() strips formatting
         parser.process(b"\x1b[31mWorking...\x1b[0m");
         let content = parser.screen().contents();
-        assert_eq!(detect_pi(&content), AgentState::Busy);
+        assert_eq!(detect_pi(&content), AgentState::Working);
     }
 
     #[test]

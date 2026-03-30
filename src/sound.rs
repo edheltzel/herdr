@@ -14,7 +14,7 @@ static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 pub enum Sound {
     /// Agent finished work (transitioned to Idle).
     Done,
-    /// Agent needs input (transitioned to Waiting).
+    /// Agent needs input (transitioned to Blocked).
     Request,
 }
 

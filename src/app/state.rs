@@ -38,9 +38,9 @@ pub struct Palette {
     pub mauve: Color,
     /// Done / idle states.
     pub green: Color,
-    /// Busy / running states.
+    /// Working / running states.
     pub yellow: Color,
-    /// Needs attention / waiting states.
+    /// Needs attention / blocked states.
     pub red: Color,
     /// Unseen / done notification accent.
     pub blue: Color,

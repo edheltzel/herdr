@@ -15,30 +15,30 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::pty_callbacks::PtyResponses;
 
-const CLAUDE_BUSY_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 
 fn stabilize_agent_state(
     agent: Option<Agent>,
     previous: AgentState,
     raw: AgentState,
     now: std::time::Instant,
-    last_claude_busy_at: &mut Option<std::time::Instant>,
+    last_claude_working_at: &mut Option<std::time::Instant>,
 ) -> AgentState {
     if agent != Some(Agent::Claude) {
         return raw;
     }
 
     match raw {
-        AgentState::Busy => {
-            *last_claude_busy_at = Some(now);
-            AgentState::Busy
+        AgentState::Working => {
+            *last_claude_working_at = Some(now);
+            AgentState::Working
         }
-        AgentState::Waiting => AgentState::Waiting,
-        AgentState::Idle if previous == AgentState::Busy => {
-            if last_claude_busy_at
-                .is_some_and(|last_busy| now.duration_since(last_busy) < CLAUDE_BUSY_HOLD)
+        AgentState::Blocked => AgentState::Blocked,
+        AgentState::Idle if previous == AgentState::Working => {
+            if last_claude_working_at
+                .is_some_and(|last_working| now.duration_since(last_working) < CLAUDE_WORKING_HOLD)
             {
-                AgentState::Busy
+                AgentState::Working
             } else {
                 AgentState::Idle
             }
@@ -301,7 +301,7 @@ impl PaneRuntime {
                 let mut agent: Option<Agent> = None;
                 let mut state = AgentState::Unknown;
                 let mut last_process_check = Instant::now();
-                let mut last_claude_busy_at = None;
+                let mut last_claude_working_at = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -359,7 +359,7 @@ impl PaneRuntime {
                         state,
                         raw_state,
                         now,
-                        &mut last_claude_busy_at,
+                        &mut last_claude_working_at,
                     );
 
                     if new_state != state || agent_changed {
@@ -563,40 +563,40 @@ mod tests {
     }
 
     #[test]
-    fn claude_busy_is_sticky_for_short_gap() {
+    fn claude_working_is_sticky_for_short_gap() {
         let now = std::time::Instant::now();
-        let mut last_busy = None;
+        let mut last_working = None;
 
-        let busy = stabilize_agent_state(
+        let working = stabilize_agent_state(
             Some(Agent::Claude),
             AgentState::Idle,
-            AgentState::Busy,
+            AgentState::Working,
             now,
-            &mut last_busy,
+            &mut last_working,
         );
-        assert_eq!(busy, AgentState::Busy);
+        assert_eq!(working, AgentState::Working);
 
-        let still_busy = stabilize_agent_state(
+        let still_working = stabilize_agent_state(
             Some(Agent::Claude),
-            AgentState::Busy,
+            AgentState::Working,
             AgentState::Idle,
             now + std::time::Duration::from_millis(400),
-            &mut last_busy,
+            &mut last_working,
         );
-        assert_eq!(still_busy, AgentState::Busy);
+        assert_eq!(still_working, AgentState::Working);
     }
 
     #[test]
     fn claude_transitions_to_idle_after_hold_expires() {
         let now = std::time::Instant::now();
-        let mut last_busy = Some(now);
+        let mut last_working = Some(now);
 
         let state = stabilize_agent_state(
             Some(Agent::Claude),
-            AgentState::Busy,
+            AgentState::Working,
             AgentState::Idle,
-            now + CLAUDE_BUSY_HOLD + std::time::Duration::from_millis(1),
-            &mut last_busy,
+            now + CLAUDE_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
     }
@@ -604,14 +604,14 @@ mod tests {
     #[test]
     fn non_claude_states_are_unchanged() {
         let now = std::time::Instant::now();
-        let mut last_busy = None;
+        let mut last_working = None;
 
         let state = stabilize_agent_state(
             Some(Agent::Codex),
-            AgentState::Busy,
+            AgentState::Working,
             AgentState::Idle,
             now,
-            &mut last_busy,
+            &mut last_working,
         );
         assert_eq!(state, AgentState::Idle);
     }

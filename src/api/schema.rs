@@ -445,8 +445,8 @@ pub enum EventData {
 #[serde(rename_all = "snake_case")]
 pub enum PaneAgentState {
     Idle,
-    Busy,
-    Waiting,
+    Working,
+    Blocked,
     Unknown,
 }
 
@@ -562,7 +562,7 @@ mod tests {
                     {
                         "type": "pane.agent_state_changed",
                         "pane_id": "p_1_1",
-                        "state": "waiting"
+                        "state": "blocked"
                     }
                 ]
             }
@@ -588,7 +588,7 @@ mod tests {
             &params.subscriptions[1],
             Subscription::PaneAgentStateChanged {
                 pane_id,
-                state: Some(PaneAgentState::Waiting),
+                state: Some(PaneAgentState::Blocked),
             } if pane_id == "p_1_1"
         ));
     }
@@ -656,7 +656,7 @@ mod tests {
                 "match_event": {
                     "event": "pane_agent_state_changed",
                     "pane_id": "p_1",
-                    "state": "waiting"
+                    "state": "blocked"
                 },
                 "timeout_ms": 30000
             }
@@ -671,7 +671,7 @@ mod tests {
             params.match_event,
             EventMatch::PaneAgentStateChanged {
                 pane_id: "p_1".into(),
-                state: PaneAgentState::Waiting,
+                state: PaneAgentState::Blocked,
             }
         );
     }

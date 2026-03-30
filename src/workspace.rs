@@ -233,7 +233,7 @@ impl Workspace {
                 }
             })
             .collect();
-        // Sort by urgency: waiting > busy > idle(unseen) > idle > unknown
+        // Sort by urgency: blocked > working > idle(unseen) > idle > unknown
         details.sort_by(|a, b| b.urgency().cmp(&a.urgency()));
         details
     }
@@ -268,8 +268,8 @@ impl PaneDetail {
     /// Urgency score for sort ordering (higher = more urgent, shown first).
     fn urgency(&self) -> u8 {
         match (self.state, self.seen) {
-            (AgentState::Waiting, _) => 4,
-            (AgentState::Busy, _) => 3,
+            (AgentState::Blocked, _) => 4,
+            (AgentState::Working, _) => 3,
             (AgentState::Idle, false) => 2, // unseen/done
             (AgentState::Idle, true) => 1,
             (AgentState::Unknown, _) => 0,
@@ -428,10 +428,10 @@ mod tests {
 
         let root_id = *ws.panes.keys().find(|id| **id != id2).unwrap();
         ws.panes.get_mut(&root_id).unwrap().state = AgentState::Idle;
-        ws.panes.get_mut(&id2).unwrap().state = AgentState::Busy;
+        ws.panes.get_mut(&id2).unwrap().state = AgentState::Working;
 
         let (state, _) = ws.aggregate_state();
-        assert_eq!(state, AgentState::Busy);
+        assert_eq!(state, AgentState::Working);
     }
 
     #[test]
@@ -471,11 +471,11 @@ mod tests {
         let mut ws = Workspace::test_new("test");
         let id2 = ws.test_split(Direction::Horizontal);
 
-        ws.panes.get_mut(&id2).unwrap().state = AgentState::Waiting;
+        ws.panes.get_mut(&id2).unwrap().state = AgentState::Blocked;
 
         let states = ws.pane_states();
         assert_eq!(states.len(), 2);
-        assert!(states.iter().any(|(s, _)| *s == AgentState::Waiting));
+        assert!(states.iter().any(|(s, _)| *s == AgentState::Blocked));
         assert!(states.iter().any(|(s, _)| *s == AgentState::Unknown));
     }
 
