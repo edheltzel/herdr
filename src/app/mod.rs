@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
-const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
