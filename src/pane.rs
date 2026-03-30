@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::io::{BufWriter, Read, Write};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicU16, AtomicU32, Ordering},
     Arc, RwLock,
 };
 
@@ -83,7 +83,7 @@ pub struct PaneRuntime {
     resize_tx: mpsc::Sender<(u16, u16)>,
     current_size: Cell<(u16, u16)>,
     child_pid: Arc<AtomicU32>,
-    pub kitty_keyboard: Arc<AtomicBool>,
+    pub kitty_keyboard_flags: Arc<AtomicU16>,
     /// Live screen content snapshot — updated by reader, read by detector.
     /// Decouples detection from parser viewport state (scrollback).
     /// Kept alive here so the Arc isn't dropped; tasks hold their own clones.
@@ -165,7 +165,7 @@ impl PaneRuntime {
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let responses = PtyResponses::new();
-        let kitty_keyboard = responses.kitty_keyboard.clone();
+        let kitty_keyboard_flags = responses.kitty_keyboard_flags.clone();
         let parser = Arc::new(RwLock::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
@@ -419,7 +419,7 @@ impl PaneRuntime {
             resize_tx,
             current_size: Cell::new((rows, cols)),
             child_pid,
-            kitty_keyboard,
+            kitty_keyboard_flags,
             screen_content,
             detect_handle,
         })

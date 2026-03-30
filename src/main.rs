@@ -30,6 +30,7 @@ mod pane;
 mod persist;
 mod platform;
 mod pty_callbacks;
+mod raw_input;
 mod selection;
 mod sound;
 mod ui;
@@ -301,7 +302,12 @@ fn main() -> io::Result<()> {
             io::stdout(),
             EnableMouseCapture,
             EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
         )?;
 
         // tmux doesn't understand kitty keyboard protocol push (\e[>1u).

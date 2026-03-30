@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::terminal;
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -35,6 +35,8 @@ pub struct App {
     event_hub: crate::api::EventHub,
     last_focus: Option<(usize, crate::layout::PaneId)>,
     no_session: bool,
+    input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
+    last_terminal_size: Option<(u16, u16)>,
     config_diagnostic_deadline: Option<Instant>,
     toast_deadline: Option<Instant>,
     last_git_remote_status_refresh: Instant,
@@ -192,10 +194,16 @@ impl App {
             event_hub,
             last_focus,
             no_session,
+            input_rx: None,
+            last_terminal_size: terminal::size().ok(),
         }
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        if self.input_rx.is_none() {
+            self.input_rx = Some(crate::raw_input::spawn_input_reader());
+        }
+
         while !self.state.should_quit {
             if self
                 .config_diagnostic_deadline
@@ -236,18 +244,10 @@ impl App {
             }
 
             self.sync_focus_events();
+            self.handle_resize_poll();
+            self.drain_raw_input().await;
 
-            if event::poll(Duration::from_millis(16))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        self.handle_key(key).await;
-                    }
-                    Event::Paste(text) => self.handle_paste(text).await,
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                }
-            }
+            tokio::time::sleep(Duration::from_millis(16)).await;
 
             if self.state.request_complete_onboarding {
                 self.state.request_complete_onboarding = false;
@@ -271,6 +271,33 @@ impl App {
         }
 
         Ok(())
+    }
+
+    async fn drain_raw_input(&mut self) {
+        while let Some(rx) = self.input_rx.as_mut() {
+            match rx.try_recv() {
+                Ok(crate::raw_input::RawInputEvent::Key(key)) => {
+                    if key.kind == crossterm::event::KeyEventKind::Press {
+                        self.handle_key(key).await;
+                    }
+                }
+                Ok(crate::raw_input::RawInputEvent::Paste(text)) => self.handle_paste(text).await,
+                Ok(crate::raw_input::RawInputEvent::Mouse(mouse)) => self.handle_mouse(mouse),
+                Ok(crate::raw_input::RawInputEvent::Unsupported) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.input_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn handle_resize_poll(&mut self) {
+        let Ok(size) = terminal::size() else { return };
+        if self.last_terminal_size != Some(size) {
+            self.last_terminal_size = Some(size);
+        }
     }
 
     fn drain_internal_events(&mut self) {
@@ -871,11 +898,14 @@ impl App {
                         })
                         .unwrap();
                     };
-                    let kitty = runtime
+                    let flags = runtime
                         .1
-                        .kitty_keyboard
+                        .kitty_keyboard_flags
                         .load(std::sync::atomic::Ordering::Relaxed);
-                    let bytes = crate::input::encode_key(key_event, kitty);
+                    let bytes = crate::input::encode_key(
+                        key_event,
+                        crate::input::KeyboardProtocol::from_kitty_flags(flags),
+                    );
                     if let Err(err) = runtime.0.try_send(Bytes::from(bytes)) {
                         return serde_json::to_string(&ErrorResponse {
                             id: request.id,

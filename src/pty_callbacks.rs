@@ -8,7 +8,7 @@
 //! don't need responses. Only QUERY sequences need us to reply.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU16, Ordering},
     Arc, Mutex,
 };
 
@@ -23,8 +23,10 @@ pub struct PtyResponses {
     /// pops → fish's mode 1 is restored).
     kitty_stack: Arc<Mutex<Vec<u16>>>,
     /// Derived from kitty_stack: true when stack is non-empty.
-    /// Shared with PaneRuntime for fast-path key encoding decisions.
+    /// Kept for quick feature checks.
     pub kitty_keyboard: Arc<AtomicBool>,
+    /// Exact active kitty keyboard flags from the top of the stack.
+    pub kitty_keyboard_flags: Arc<AtomicU16>,
 }
 
 impl PtyResponses {
@@ -123,6 +125,7 @@ impl vt100::Callbacks for PtyResponses {
                 let mut stack = self.kitty_stack.lock().unwrap();
                 stack.push(param0);
                 self.kitty_keyboard.store(true, Ordering::Relaxed);
+                self.kitty_keyboard_flags.store(param0, Ordering::Relaxed);
             }
 
             // Kitty keyboard pop: \e[<Nu → child reverts to previous mode
@@ -135,8 +138,10 @@ impl vt100::Callbacks for PtyResponses {
                         break;
                     }
                 }
+                let flags = stack.last().copied().unwrap_or(0);
                 self.kitty_keyboard
                     .store(!stack.is_empty(), Ordering::Relaxed);
+                self.kitty_keyboard_flags.store(flags, Ordering::Relaxed);
             }
 
             // === Terminal Identification ===
@@ -261,28 +266,33 @@ mod tests {
 
         // Initially off
         assert!(!r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 0);
 
         // Fish pushes mode 1
         p.process(b"\x1b[>1u");
         assert!(r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 1);
         p.process(b"\x1b[?u");
         assert_eq!(r.take(), b"\x1b[?1u");
 
         // Neovim pushes mode 3
         p.process(b"\x1b[>3u");
         assert!(r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 3);
         p.process(b"\x1b[?u");
         assert_eq!(r.take(), b"\x1b[?3u");
 
         // Neovim pops → fish's mode 1 is restored
         p.process(b"\x1b[<u");
         assert!(r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 1);
         p.process(b"\x1b[?u");
         assert_eq!(r.take(), b"\x1b[?1u");
 
         // Fish pops → back to legacy
         p.process(b"\x1b[<u");
         assert!(!r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 0);
         p.process(b"\x1b[?u");
         assert_eq!(r.take(), b"\x1b[?0u");
     }
@@ -295,6 +305,7 @@ mod tests {
         // Pop with nothing on stack — should not crash
         p.process(b"\x1b[<u");
         assert!(!r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -307,16 +318,19 @@ mod tests {
         p.process(b"\x1b[>3u");
         p.process(b"\x1b[>5u");
         assert!(r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 5);
 
         // Pop 2 at once
         p.process(b"\x1b[<2u");
         assert!(r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 1);
         p.process(b"\x1b[?u");
         assert_eq!(r.take(), b"\x1b[?1u"); // only first push remains
 
         // Pop last one
         p.process(b"\x1b[<u");
         assert!(!r.kitty_keyboard.load(Ordering::Relaxed));
+        assert_eq!(r.kitty_keyboard_flags.load(Ordering::Relaxed), 0);
     }
 
     #[test]

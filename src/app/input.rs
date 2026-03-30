@@ -2,6 +2,8 @@
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+
+use crate::input::TerminalKey;
 use ratatui::layout::{Direction, Rect};
 use tracing::warn;
 
@@ -18,16 +20,22 @@ use super::App;
 // ---------------------------------------------------------------------------
 
 impl App {
-    pub(super) async fn handle_key(&mut self, key: KeyEvent) {
+    pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
-            Mode::Onboarding => self.handle_onboarding_key(key),
-            Mode::Navigate => handle_navigate_key(&mut self.state, key),
             Mode::Terminal => self.handle_terminal_key(key).await,
-            Mode::RenameSession => handle_rename_key(&mut self.state, key),
-            Mode::Resize => handle_resize_key(&mut self.state, key),
-            Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key),
-            Mode::ContextMenu => handle_context_menu_key(&mut self.state, key),
-            Mode::Settings => self.handle_settings_key(key),
+            _ => {
+                let key = key.as_key_event();
+                match self.state.mode {
+                    Mode::Onboarding => self.handle_onboarding_key(key),
+                    Mode::Navigate => handle_navigate_key(&mut self.state, key),
+                    Mode::RenameSession => handle_rename_key(&mut self.state, key),
+                    Mode::Resize => handle_resize_key(&mut self.state, key),
+                    Mode::ConfirmClose => handle_confirm_close_key(&mut self.state, key),
+                    Mode::ContextMenu => handle_context_menu_key(&mut self.state, key),
+                    Mode::Settings => self.handle_settings_key(key),
+                    Mode::Terminal => unreachable!(),
+                }
+            }
         }
     }
 
@@ -122,11 +130,13 @@ impl App {
         }
     }
 
-    async fn handle_terminal_key(&mut self, key: KeyEvent) {
+    async fn handle_terminal_key(&mut self, key: TerminalKey) {
         self.state.clear_selection();
         self.state.update_dismissed = true;
 
-        if self.state.is_prefix(&key) {
+        let key_event = key.as_key_event();
+
+        if self.state.is_prefix(&key_event) {
             self.state.mode = Mode::Navigate;
             return;
         }
@@ -134,10 +144,15 @@ impl App {
         if let Some(ws) = self.state.active.and_then(|i| self.state.workspaces.get(i)) {
             if let Some(rt) = ws.focused_runtime() {
                 rt.scroll_reset();
-                let kitty = rt.kitty_keyboard.load(std::sync::atomic::Ordering::Relaxed);
-                let bytes = crate::input::encode_key(key, kitty);
+                let flags = rt
+                    .kitty_keyboard_flags
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let bytes = crate::input::encode_terminal_key(
+                    key,
+                    crate::input::KeyboardProtocol::from_kitty_flags(flags),
+                );
                 if bytes.is_empty() {
-                    warn!(code = ?key.code, mods = ?key.modifiers, state = ?key.state, "key produced empty encoding");
+                    warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
                 } else {
                     let _ = rt.sender.send(Bytes::from(bytes)).await;
                 }
