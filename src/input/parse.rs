@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MediaKeyCode, ModifierKeyCode};
 
 use super::TerminalKey;
 
@@ -116,10 +116,10 @@ fn parse_legacy_special_sequence(data: &str) -> Option<TerminalKey> {
         "\x1b\x1b[B" => Some(TerminalKey::new(KeyCode::Down, KeyModifiers::ALT)),
         "\x1b\x1b[C" => Some(TerminalKey::new(KeyCode::Right, KeyModifiers::ALT)),
         "\x1b\x1b[D" => Some(TerminalKey::new(KeyCode::Left, KeyModifiers::ALT)),
-        "\x1b[A" => Some(TerminalKey::new(KeyCode::Up, KeyModifiers::empty())),
-        "\x1b[B" => Some(TerminalKey::new(KeyCode::Down, KeyModifiers::empty())),
-        "\x1b[C" => Some(TerminalKey::new(KeyCode::Right, KeyModifiers::empty())),
-        "\x1b[D" => Some(TerminalKey::new(KeyCode::Left, KeyModifiers::empty())),
+        "\x1b[A" | "\x1bOA" => Some(TerminalKey::new(KeyCode::Up, KeyModifiers::empty())),
+        "\x1b[B" | "\x1bOB" => Some(TerminalKey::new(KeyCode::Down, KeyModifiers::empty())),
+        "\x1b[C" | "\x1bOC" => Some(TerminalKey::new(KeyCode::Right, KeyModifiers::empty())),
+        "\x1b[D" | "\x1bOD" => Some(TerminalKey::new(KeyCode::Left, KeyModifiers::empty())),
         "\x1b[H" | "\x1bOH" | "\x1b[1~" | "\x1b[7~" => {
             Some(TerminalKey::new(KeyCode::Home, KeyModifiers::empty()))
         }
@@ -141,8 +141,9 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
     if let Some(body) = body.strip_prefix("1;") {
         let suffix_char = body.chars().last()?;
         if suffix_char.is_ascii_alphabetic() {
-            let modifier = body.strip_suffix(suffix_char)?;
-            let mod_value = modifier.parse::<u8>().ok()?.checked_sub(1)?;
+            let modifier_and_event = body.strip_suffix(suffix_char)?;
+            let (modifier_text, event_type) = split_modifier_and_event(modifier_and_event);
+            let mod_value = modifier_text.parse::<u8>().ok()?.checked_sub(1)?;
             let code = match suffix_char {
                 'A' => KeyCode::Up,
                 'B' => KeyCode::Down,
@@ -152,7 +153,10 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
                 'F' => KeyCode::End,
                 _ => return None,
             };
-            return Some(TerminalKey::new(code, key_modifiers_from_u8(mod_value)));
+            return Some(
+                TerminalKey::new(code, key_modifiers_from_u8(mod_value))
+                    .with_kind(parse_kitty_event_type(event_type)?),
+            );
         }
     }
 
@@ -167,6 +171,13 @@ fn parse_xterm_modified_special_sequence(data: &str) -> Option<TerminalKey> {
         _ => return None,
     };
     Some(TerminalKey::new(code, key_modifiers_from_u8(mod_value)))
+}
+
+fn split_modifier_and_event(input: &str) -> (&str, Option<&str>) {
+    match input.split_once(':') {
+        Some((modifier, event)) if !modifier.is_empty() => (modifier, Some(event)),
+        _ => (input, None),
+    }
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -186,6 +197,13 @@ fn kitty_codepoint_to_keycode(codepoint: u32) -> Option<KeyCode> {
         9 => Some(KeyCode::Tab),
         13 | 57414 => Some(KeyCode::Enter),
         27 => Some(KeyCode::Esc),
+        57358 => Some(KeyCode::CapsLock),
+        57359 => Some(KeyCode::ScrollLock),
+        57360 => Some(KeyCode::NumLock),
+        57361 => Some(KeyCode::PrintScreen),
+        57362 => Some(KeyCode::Pause),
+        57363 => Some(KeyCode::Menu),
+        57376..=57398 => Some(KeyCode::F((codepoint - 57376 + 13) as u8)),
         57417 => Some(KeyCode::Left),
         57418 => Some(KeyCode::Right),
         57419 => Some(KeyCode::Up),
@@ -196,8 +214,41 @@ fn kitty_codepoint_to_keycode(codepoint: u32) -> Option<KeyCode> {
         57424 => Some(KeyCode::End),
         57425 => Some(KeyCode::Insert),
         57426 => Some(KeyCode::Delete),
+        57427 => Some(KeyCode::KeypadBegin),
+        57428 => Some(KeyCode::Media(MediaKeyCode::Play)),
+        57429 => Some(KeyCode::Media(MediaKeyCode::Pause)),
+        57430 => Some(KeyCode::Media(MediaKeyCode::PlayPause)),
+        57431 => Some(KeyCode::Media(MediaKeyCode::Reverse)),
+        57432 => Some(KeyCode::Media(MediaKeyCode::Stop)),
+        57433 => Some(KeyCode::Media(MediaKeyCode::FastForward)),
+        57434 => Some(KeyCode::Media(MediaKeyCode::Rewind)),
+        57435 => Some(KeyCode::Media(MediaKeyCode::TrackNext)),
+        57436 => Some(KeyCode::Media(MediaKeyCode::TrackPrevious)),
+        57437 => Some(KeyCode::Media(MediaKeyCode::Record)),
+        57438 => Some(KeyCode::Media(MediaKeyCode::LowerVolume)),
+        57439 => Some(KeyCode::Media(MediaKeyCode::RaiseVolume)),
+        57440 => Some(KeyCode::Media(MediaKeyCode::MuteVolume)),
+        57441 => Some(KeyCode::Modifier(ModifierKeyCode::LeftShift)),
+        57442 => Some(KeyCode::Modifier(ModifierKeyCode::LeftControl)),
+        57443 => Some(KeyCode::Modifier(ModifierKeyCode::LeftAlt)),
+        57444 => Some(KeyCode::Modifier(ModifierKeyCode::LeftSuper)),
+        57445 => Some(KeyCode::Modifier(ModifierKeyCode::LeftHyper)),
+        57446 => Some(KeyCode::Modifier(ModifierKeyCode::LeftMeta)),
+        57447 => Some(KeyCode::Modifier(ModifierKeyCode::RightShift)),
+        57448 => Some(KeyCode::Modifier(ModifierKeyCode::RightControl)),
+        57449 => Some(KeyCode::Modifier(ModifierKeyCode::RightAlt)),
+        57450 => Some(KeyCode::Modifier(ModifierKeyCode::RightSuper)),
+        57451 => Some(KeyCode::Modifier(ModifierKeyCode::RightHyper)),
+        57452 => Some(KeyCode::Modifier(ModifierKeyCode::RightMeta)),
+        57453 => Some(KeyCode::Modifier(ModifierKeyCode::IsoLevel3Shift)),
+        57454 => Some(KeyCode::Modifier(ModifierKeyCode::IsoLevel5Shift)),
+        value if is_kitty_functional_codepoint(value) => None,
         value => char::from_u32(value).map(KeyCode::Char),
     }
+}
+
+fn is_kitty_functional_codepoint(codepoint: u32) -> bool {
+    (57358..=57454).contains(&codepoint)
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.

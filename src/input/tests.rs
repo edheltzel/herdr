@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
 
 use super::{
     encode_key, encode_terminal_key, parse_terminal_key_sequence, KeyboardProtocol, TerminalKey,
@@ -323,6 +323,30 @@ fn parse_legacy_up_arrow_sequence() {
     let key = parse_terminal_key_sequence("\x1b[A").unwrap();
     assert_eq!(key.code, KeyCode::Up);
     assert_eq!(key.modifiers, KeyModifiers::empty());
+}
+
+#[test]
+fn parse_kitty_modifier_sequence() {
+    let key = parse_terminal_key_sequence("\x1b[57441;2:1u").unwrap();
+    assert_eq!(key.code, KeyCode::Modifier(ModifierKeyCode::LeftShift));
+    assert_eq!(key.modifiers, KeyModifiers::SHIFT);
+    assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+}
+
+#[test]
+fn parse_ghostty_enhanced_up_arrow_press_sequence() {
+    let key = parse_terminal_key_sequence("\x1b[1;1:1A").unwrap();
+    assert_eq!(key.code, KeyCode::Up);
+    assert_eq!(key.modifiers, KeyModifiers::empty());
+    assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+}
+
+#[test]
+fn parse_ghostty_enhanced_up_arrow_release_sequence() {
+    let key = parse_terminal_key_sequence("\x1b[1;1:3A").unwrap();
+    assert_eq!(key.code, KeyCode::Up);
+    assert_eq!(key.modifiers, KeyModifiers::empty());
+    assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
 }
 
 #[test]

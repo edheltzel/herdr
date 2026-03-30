@@ -152,7 +152,22 @@ impl App {
                     crate::input::KeyboardProtocol::from_kitty_flags(flags),
                 );
                 if bytes.is_empty() {
-                    warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
+                    if key.kind != crossterm::event::KeyEventKind::Release
+                        && !matches!(
+                            key.code,
+                            KeyCode::CapsLock
+                                | KeyCode::ScrollLock
+                                | KeyCode::NumLock
+                                | KeyCode::PrintScreen
+                                | KeyCode::Pause
+                                | KeyCode::Menu
+                                | KeyCode::KeypadBegin
+                                | KeyCode::Media(_)
+                                | KeyCode::Modifier(_)
+                        )
+                    {
+                        warn!(code = ?key_event.code, mods = ?key_event.modifiers, state = ?key_event.state, "key produced empty encoding");
+                    }
                 } else {
                     let _ = rt.sender.send(Bytes::from(bytes)).await;
                 }

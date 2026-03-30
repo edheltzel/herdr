@@ -9,6 +9,8 @@ legacy_home	1b5b48	home	-	press
 xterm_alt_up	1b5b313b3341	up	alt	press	
 xterm_ctrl_left	1b5b313b3544	left	control	press	
 xterm_shift_pageup	1b5b353b327e	pageup	shift	press	
+ghostty_enhanced_up_press	1b5b313b313a3141	up	-	press	
+ghostty_enhanced_up_release	1b5b313b313a3341	up	-	release	
 modify_other_keys_ctrl_shift_l	1b5b32373b363b3130387e	char:l	control+shift	press	
 kitty_shift_letter	1b5b3130383a37363b323a3175	char:l	shift	press	76
 kitty_shift_symbol	1b5b34393a33333b323a3175	char:1	shift	press	33
