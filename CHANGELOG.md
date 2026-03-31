@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.2.4] - 2026-04-01
+
 ### Fixed
 - Fixed a macOS-only startup misdetection where pi could briefly appear as codex in the sidebar because process environment entries were being parsed as command-line arguments.
 
