@@ -32,6 +32,8 @@ pub struct PaneInfo {
     pub rect: Rect,
     /// Inner rect (content area, excluding borders). Used for selection.
     pub inner_rect: Rect,
+    /// Reserved scrollbar lane, when scrollback is visible.
+    pub scrollbar_rect: Option<Rect>,
     pub is_focused: bool,
 }
 
@@ -315,6 +317,7 @@ fn collect_panes(node: &Node, area: Rect, focus: PaneId, result: &mut Vec<PaneIn
                 rect: area,
                 // inner_rect is set during render when we know if borders are shown
                 inner_rect: area,
+                scrollbar_rect: None,
                 is_focused: *id == focus,
             });
         }

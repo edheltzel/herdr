@@ -116,25 +116,41 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
         return Vec::new();
     };
 
+    let multi_pane = ws.layout.pane_count() > 1;
+    let terminal_active = app.mode == Mode::Terminal;
+
     if ws.zoomed {
         let focused_id = ws.layout.focused();
+        let mut inner_rect = area;
+        let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&focused_id) {
-            rt.resize(area.height, area.width);
+            if rt
+                .scroll_metrics()
+                .is_some_and(|metrics| metrics.max_offset_from_bottom > 0 && area.width > 1)
+            {
+                inner_rect.width = inner_rect.width.saturating_sub(1);
+                scrollbar_rect = Some(Rect::new(
+                    area.x + area.width.saturating_sub(1),
+                    area.y,
+                    1,
+                    area.height,
+                ));
+            }
+            rt.resize(inner_rect.height, inner_rect.width);
         }
         return vec![PaneInfo {
             id: focused_id,
             rect: area,
-            inner_rect: area,
+            inner_rect,
+            scrollbar_rect,
             is_focused: true,
         }];
     }
 
-    let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let inner = if multi_pane {
+        let pane_inner = if multi_pane {
             let border_set = if info.is_focused && terminal_active {
                 ratatui::symbols::border::THICK
             } else {
@@ -147,11 +163,27 @@ fn compute_pane_infos(app: &AppState, area: Rect) -> Vec<PaneInfo> {
         } else {
             area
         };
-        info.inner_rect = inner;
 
+        let mut inner_rect = pane_inner;
+        let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&info.id) {
-            rt.resize(inner.height, inner.width);
+            if rt
+                .scroll_metrics()
+                .is_some_and(|metrics| metrics.max_offset_from_bottom > 0 && pane_inner.width > 1)
+            {
+                inner_rect.width = inner_rect.width.saturating_sub(1);
+                scrollbar_rect = Some(Rect::new(
+                    pane_inner.x + pane_inner.width.saturating_sub(1),
+                    pane_inner.y,
+                    1,
+                    pane_inner.height,
+                ));
+            }
+            rt.resize(inner_rect.height, inner_rect.width);
         }
+
+        info.inner_rect = inner_rect;
+        info.scrollbar_rect = scrollbar_rect;
     }
 
     pane_infos
@@ -660,16 +692,7 @@ fn dim_color(color: Color) -> Color {
 }
 
 pub(crate) fn pane_scrollbar_rect(info: &PaneInfo) -> Option<Rect> {
-    let inner = info.inner_rect;
-    if inner.width == 0 || inner.height == 0 {
-        return None;
-    }
-    Some(Rect::new(
-        inner.x + inner.width.saturating_sub(1),
-        inner.y,
-        1,
-        inner.height,
-    ))
+    info.scrollbar_rect
 }
 
 pub(crate) fn scrollbar_offset_from_row(
@@ -1716,7 +1739,8 @@ mod tests {
         let info = PaneInfo {
             id: crate::layout::PaneId::from_raw(1),
             rect: Rect::new(0, 0, 12, 8),
-            inner_rect: Rect::new(1, 1, 10, 6),
+            inner_rect: Rect::new(1, 1, 9, 6),
+            scrollbar_rect: Some(Rect::new(10, 1, 1, 6)),
             is_focused: true,
         };
 
