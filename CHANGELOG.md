@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Fixed a macOS-only startup misdetection where pi could briefly appear as codex in the sidebar because process environment entries were being parsed as command-line arguments.
+
 ## [0.2.3] - 2026-03-31
 
 ### Changed
@@ -19,9 +22,6 @@
 - Fixed alternate-screen scrollback handling so full-screen terminal apps can preserve recoverable history inside herdr panes instead of losing rows that scroll off.
 - Fixed Codex in herdr panes losing transcript/history while running in alternate screen, so past output remains scrollable instead of disappearing as the session grows.
 - Hid the rendered terminal cursor while a pane is scrolled back, avoiding stray cursor blocks appearing in the wrong place during history navigation.
-
-### Fixed
-- Fixed a macOS-only startup misdetection where pi could briefly appear as codex in the sidebar because process environment entries were being parsed as command-line arguments.
 
 ## [0.2.1] - 2026-03-31
 
