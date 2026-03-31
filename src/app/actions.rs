@@ -197,8 +197,13 @@ impl AppState {
         match event {
             AppEvent::PaneDied { pane_id } => self.handle_pane_died(pane_id),
             AppEvent::UpdateReady { version } => {
-                self.update_available = Some(version);
-                self.update_dismissed = false;
+                self.update_available = Some(version.clone());
+                self.update_dismissed = true;
+                self.toast = Some(ToastNotification {
+                    kind: ToastKind::UpdateInstalled,
+                    title: format!("updated to v{version}"),
+                    context: "restart to use it".to_string(),
+                });
             }
             AppEvent::StateChanged {
                 pane_id,
@@ -240,6 +245,7 @@ impl AppState {
                                 let event_text = match kind {
                                     ToastKind::NeedsAttention => "needs attention",
                                     ToastKind::Finished => "finished",
+                                    ToastKind::UpdateInstalled => "updated",
                                 };
                                 self.toast = Some(ToastNotification {
                                     kind,

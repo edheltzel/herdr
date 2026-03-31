@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 const GITHUB_REPO: &str = "ogulcancelik/herdr";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -213,6 +214,21 @@ pub fn self_update() -> Result<Version, String> {
 /// Background auto-update: check, download, install, notify TUI.
 /// Runs in a background thread at startup.
 pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
+        let version = version.trim();
+        if !version.is_empty() {
+            tracing::info!(
+                env = FAKE_UPDATE_VERSION_ENV,
+                version,
+                "using fake update version for local testing"
+            );
+            let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
+                version: version.to_string(),
+            });
+        }
+        return;
+    }
+
     let release = match check_latest() {
         Ok(Some(r)) => r,
         _ => return, // up to date or failed — silently do nothing

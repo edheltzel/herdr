@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,13 @@ fn unique_test_dir() -> PathBuf {
 struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+}
+
+fn test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("api ping test lock poisoned")
 }
 
 fn wait_for_socket(path: &Path, timeout: Duration) {
@@ -122,6 +130,7 @@ fn wait_for_event(
 
 #[test]
 fn ping_over_socket_returns_version() {
+    let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -145,6 +154,7 @@ fn ping_over_socket_returns_version() {
 
 #[test]
 fn workspace_list_and_create_round_trip() {
+    let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -292,6 +302,7 @@ fn workspace_list_and_create_round_trip() {
 
 #[test]
 fn events_subscribe_streams_lifecycle_and_agent_events() {
+    let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
@@ -425,6 +436,7 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
 
 #[test]
 fn events_subscribe_streams_output_and_agent_state_events() {
+    let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");

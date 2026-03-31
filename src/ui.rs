@@ -92,11 +92,6 @@ pub fn render(app: &AppState, frame: &mut Frame) {
     }
 
     // Notifications (rendered on top of everything)
-    if let Some(version) = &app.update_available {
-        if !app.update_dismissed {
-            render_update_notification(frame, terminal_area, version, &app.palette);
-        }
-    }
     let has_config_diagnostic = app.config_diagnostic.is_some();
     if let Some(message) = &app.config_diagnostic {
         render_config_diagnostic(frame, terminal_area, message, &app.palette);
@@ -1565,26 +1560,6 @@ fn render_context_menu(app: &AppState, frame: &mut Frame) {
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn render_update_notification(frame: &mut Frame, area: Rect, version: &str, p: &Palette) {
-    let text = format!(" ✦ herdr v{version} installed — restart to update ");
-    let width = text.len() as u16 + 2;
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(3);
-    let notif_area = Rect::new(x, y, width.min(area.width), 1);
-
-    frame.render_widget(Clear, notif_area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text,
-            Style::default()
-                .fg(p.panel_bg)
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        notif_area,
-    );
-}
-
 fn render_toast_notification(
     frame: &mut Frame,
     area: Rect,
@@ -1595,12 +1570,16 @@ fn render_toast_notification(
     let dot_color = match toast.kind {
         ToastKind::NeedsAttention => p.red,
         ToastKind::Finished => p.blue,
+        ToastKind::UpdateInstalled => p.accent,
     };
     let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
     let width = content_width.saturating_add(2).min(area.width);
     let height = 4u16.min(area.height);
     let x = area.x + area.width.saturating_sub(width);
-    let y = area.y + if offset_for_warning { 1 } else { 0 };
+    let y = area.y
+        + area
+            .height
+            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
     let toast_area = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, toast_area);

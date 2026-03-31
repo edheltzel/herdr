@@ -18,6 +18,7 @@ const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SIDEBAR_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 use crossterm::terminal;
@@ -49,6 +50,7 @@ pub struct App {
     last_sidebar_divider_click: Option<Instant>,
     next_resize_poll: Instant,
     next_animation_tick: Option<Instant>,
+    next_auto_update_check: Option<Instant>,
     last_render_at: Option<Instant>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<AtomicBool>,
@@ -226,6 +228,7 @@ impl App {
         }
 
         // Background auto-update (skipped in --no-session / test mode)
+        // Check once at startup, then periodically from the main loop.
         if !no_session {
             let update_tx = event_tx.clone();
             std::thread::spawn(move || crate::update::auto_update(update_tx));
@@ -251,6 +254,8 @@ impl App {
             last_sidebar_divider_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
+            next_auto_update_check: (!no_session)
+                .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             last_render_at: None,
             api_rx,
             event_hub,
@@ -487,6 +492,13 @@ impl App {
             changed = true;
         }
 
+        if self
+            .next_auto_update_check
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.run_auto_update_check();
+        }
+
         self.sync_animation_timer(now);
         changed
     }
@@ -514,6 +526,21 @@ impl App {
         }
     }
 
+    fn run_auto_update_check(&mut self) {
+        self.next_auto_update_check = self
+            .state
+            .update_available
+            .is_none()
+            .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
+
+        if self.state.update_available.is_some() {
+            return;
+        }
+
+        let update_tx = self.event_tx.clone();
+        std::thread::spawn(move || crate::update::auto_update(update_tx));
+    }
+
     fn git_refresh_deadline(&self) -> Option<Instant> {
         (!self.state.workspaces.is_empty())
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
@@ -534,6 +561,7 @@ impl App {
             self.toast_deadline,
             self.next_animation_tick,
             self.git_refresh_deadline(),
+            self.next_auto_update_check,
             render_deadline,
         ]
         .into_iter()
@@ -606,6 +634,7 @@ impl App {
                 let duration = match toast.kind {
                     ToastKind::NeedsAttention => Duration::from_secs(8),
                     ToastKind::Finished => Duration::from_secs(5),
+                    ToastKind::UpdateInstalled => Duration::from_secs(3),
                 };
                 Instant::now() + duration
             });

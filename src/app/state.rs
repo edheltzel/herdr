@@ -438,6 +438,7 @@ impl ContextMenuState {
 pub enum ToastKind {
     NeedsAttention,
     Finished,
+    UpdateInstalled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
