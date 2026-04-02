@@ -1494,7 +1494,25 @@ impl AppState {
                     && mouse.column < rect.x + rect.width
                     && mouse.row >= rect.y
                     && mouse.row < rect.y + rect.height;
-                if !inside {
+                let inner = Rect::new(
+                    rect.x + 1,
+                    rect.y + 1,
+                    rect.width.saturating_sub(2),
+                    rect.height.saturating_sub(2),
+                );
+                let close = crate::ui::keybind_help_close_button_rect(Rect::new(
+                    inner.x,
+                    inner.y,
+                    inner.width,
+                    1,
+                ));
+                if modal_action_from_buttons(
+                    mouse.column,
+                    mouse.row,
+                    &[(close, ModalAction::Close)],
+                ) == Some(ModalAction::Close)
+                    || !inside
+                {
                     leave_modal(self);
                 }
             }
@@ -2503,6 +2521,29 @@ mod tests {
         ));
 
         assert_eq!(app.state.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn clicking_keybind_help_close_button_closes_overlay() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::KeybindHelp;
+
+        let rect = app.state.keybind_help_rect();
+        let inner = Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        );
+        let close =
+            crate::ui::keybind_help_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            close.x,
+            close.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]

@@ -1624,6 +1624,18 @@ fn keybind_help_groups(app: &AppState) -> Vec<(&'static str, Vec<(String, &'stat
     groups
 }
 
+pub(crate) fn keybind_help_close_button_rect(area: Rect) -> Rect {
+    action_button_row_rects(
+        area,
+        &[ActionButtonSpec {
+            hint: Some("esc"),
+            label: "close",
+        }],
+        0,
+        0,
+    )[0]
+}
+
 fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
     let rect = app.keybind_help_rect();
     let Some(inner) = render_panel_shell(frame, rect, app.palette.accent, app.palette.panel_bg)
@@ -1644,14 +1656,20 @@ fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         .fg(app.palette.mauve)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(app.palette.text);
-    let hint_style = Style::default().fg(app.palette.overlay0);
-
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" keybinds", title_style),
-            Span::styled("  esc to close", hint_style),
-        ])),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+        Paragraph::new(Line::from(vec![Span::styled(" keybinds", title_style)])),
+        header,
+    );
+    render_action_button(
+        frame,
+        keybind_help_close_button_rect(header),
+        Some("esc"),
+        "close",
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface0)
+            .add_modifier(Modifier::BOLD),
     );
 
     let groups = keybind_help_groups(app);
