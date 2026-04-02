@@ -452,7 +452,7 @@ impl Workspace {
             .flat_map(Tab::pane_details)
             .map(|mut detail| {
                 if multi_tab {
-                    detail.label = format!("{} / {}", detail.tab_label, detail.agent_label);
+                    detail.label = format!("{}·{}", detail.tab_label, detail.agent_label);
                 }
                 detail
             })
@@ -796,7 +796,7 @@ mod tests {
 
         let details = ws.pane_details();
         assert_eq!(details.len(), 2);
-        assert!(details.iter().any(|detail| detail.label == "main / pi"));
-        assert!(details.iter().any(|detail| detail.label == "logs / claude"));
+        assert!(details.iter().any(|detail| detail.label == "main·pi"));
+        assert!(details.iter().any(|detail| detail.label == "logs·claude"));
     }
 }

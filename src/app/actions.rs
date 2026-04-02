@@ -60,6 +60,17 @@ fn agent_label(agent: Agent) -> &'static str {
     }
 }
 
+fn notification_context(ws: &crate::workspace::Workspace, ws_idx: usize, pane_id: PaneId) -> String {
+    let mut context = format!("{} · {}", ws.display_name(), ws_idx + 1);
+    if ws.tabs.len() > 1 {
+        if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
+            let tab = &ws.tabs[tab_idx];
+            context.push_str(&format!(" · {}", tab.display_name()));
+        }
+    }
+    context
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneStateUpdate {
     pub pane_id: PaneId,
@@ -345,7 +356,6 @@ impl AppState {
             .workspaces
             .iter()
             .position(|ws| ws.pane_state(pane_id).is_some())?;
-        let workspace_name = self.workspaces[ws_idx].display_name();
         let change = {
             let pane = self.workspaces[ws_idx]
                 .tabs
@@ -353,7 +363,7 @@ impl AppState {
                 .find_map(|tab| tab.panes.get_mut(&pane_id))?;
             update(pane)?
         };
-        self.apply_pane_state_change(ws_idx, pane_id, &workspace_name, change);
+        self.apply_pane_state_change(ws_idx, pane_id, change);
         Some(PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -368,7 +378,6 @@ impl AppState {
         &mut self,
         ws_idx: usize,
         pane_id: PaneId,
-        workspace_name: &str,
         change: EffectiveStateChange,
     ) {
         let is_active_ws = self.active == Some(ws_idx);
@@ -411,10 +420,11 @@ impl AppState {
                     ToastKind::Finished => "finished",
                     ToastKind::UpdateInstalled => "updated",
                 };
+                let context = notification_context(&self.workspaces[ws_idx], ws_idx, pane_id);
                 self.toast = Some(ToastNotification {
                     kind,
                     title: format!("{} {}", agent_label(agent), event_text),
-                    context: format!("{} · {}", workspace_name, ws_idx + 1),
+                    context,
                 });
             }
         }
@@ -691,6 +701,27 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::Finished);
         assert_eq!(toast.title, "droid finished");
         assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn background_toast_includes_tab_name_when_workspace_has_multiple_tabs() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        state.workspaces[1].tabs[0].set_custom_name("main".into());
+        let second_tab = state.workspaces[1].test_add_tab(Some("logs"));
+        let bg_pane_id = state.workspaces[1].tabs[second_tab].root_pane;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "pi needs attention");
+        assert_eq!(toast.context, "background · 2 · logs");
     }
 
     #[test]
