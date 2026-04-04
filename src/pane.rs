@@ -415,6 +415,17 @@ impl PaneTerminal {
         }
     }
 
+    fn keyboard_protocol(
+        &self,
+        fallback: crate::input::KeyboardProtocol,
+    ) -> crate::input::KeyboardProtocol {
+        match self {
+            Self::Vt(_) => fallback,
+            #[cfg(feature = "ghostty-vt")]
+            Self::Ghostty(ghostty) => ghostty.keyboard_protocol().unwrap_or(fallback),
+        }
+    }
+
     fn encode_terminal_key(
         &self,
         key: crate::input::TerminalKey,
@@ -445,15 +456,7 @@ impl PaneTerminal {
                 )
             }),
             #[cfg(feature = "ghostty-vt")]
-            Self::Ghostty(ghostty) => ghostty.input_state().and_then(|input_state| {
-                crate::input::encode_mouse_button(
-                    kind,
-                    column,
-                    row,
-                    modifiers,
-                    input_state.mouse_protocol_encoding,
-                )
-            }),
+            Self::Ghostty(ghostty) => ghostty.encode_mouse_button(kind, column, row, modifiers),
         }
     }
 
@@ -746,6 +749,15 @@ impl GhosttyPaneTerminal {
         })
     }
 
+    fn keyboard_protocol(&self) -> Option<crate::input::KeyboardProtocol> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        Some(crate::input::KeyboardProtocol::from_kitty_flags(
+            core.terminal.kitty_keyboard_flags().ok()? as u16,
+        ))
+    }
+
     fn input_state(&self) -> Option<InputState> {
         let Ok(core) = self.core.lock() else {
             return None;
@@ -799,21 +811,42 @@ impl GhosttyPaneTerminal {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
-        let application_cursor = self
-            .input_state()
-            .map(|state| state.application_cursor)
-            .unwrap_or(false);
-        if matches!(
-            key.code,
-            crossterm::event::KeyCode::Up
-                | crossterm::event::KeyCode::Down
-                | crossterm::event::KeyCode::Left
-                | crossterm::event::KeyCode::Right
-        ) && key.modifiers.is_empty()
-        {
-            return crate::input::encode_cursor_key(key.code, application_cursor);
+        if ghostty_prefers_herdr_text_encoding(key) {
+            return crate::input::encode_terminal_key(key, protocol);
         }
-        crate::input::encode_terminal_key(key, protocol)
+
+        let Ok(core) = self.core.lock() else {
+            return crate::input::encode_terminal_key(key, protocol);
+        };
+
+        let Some(event) = ghostty_key_event_from_terminal_key(key) else {
+            return crate::input::encode_terminal_key(key, protocol);
+        };
+
+        let mut encoder = match crate::ghostty::KeyEncoder::new() {
+            Ok(encoder) => encoder,
+            Err(_) => return crate::input::encode_terminal_key(key, protocol),
+        };
+        encoder.set_from_terminal(&core.terminal);
+        match encoder.encode(&event) {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            Ok(_) | Err(_) => crate::input::encode_terminal_key(key, protocol),
+        }
+    }
+
+    fn encode_mouse_button(
+        &self,
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Vec<u8>> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
+        let event = ghostty_mouse_event_from_button_kind(kind, column, row, modifiers)?;
+        encoder.encode(&event).ok()
     }
 
     fn encode_mouse_wheel(
@@ -826,40 +859,8 @@ impl GhosttyPaneTerminal {
         let Ok(core) = self.core.lock() else {
             return None;
         };
-        let mut encoder = crate::ghostty::MouseEncoder::new().ok()?;
-        encoder.set_from_terminal(&core.terminal);
-        let cols = core.terminal.cols().ok()? as u32;
-        let rows = core.terminal.rows().ok()? as u32;
-        encoder.set_size(cols, rows, 1, 1);
-
-        let mut event = crate::ghostty::MouseEvent::new().ok()?;
-        event.set_action(crate::ghostty::MOUSE_ACTION_PRESS);
-        let button = match kind {
-            crossterm::event::MouseEventKind::ScrollUp => crate::ghostty::MOUSE_BUTTON_WHEEL_UP,
-            crossterm::event::MouseEventKind::ScrollDown => {
-                crate::ghostty::MOUSE_BUTTON_WHEEL_DOWN
-            }
-            crossterm::event::MouseEventKind::ScrollLeft => {
-                crate::ghostty::MOUSE_BUTTON_WHEEL_LEFT
-            }
-            crossterm::event::MouseEventKind::ScrollRight => {
-                crate::ghostty::MOUSE_BUTTON_WHEEL_RIGHT
-            }
-            _ => return None,
-        };
-        event.set_button(button);
-        let mut ghostty_mods = 0u16;
-        if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-            ghostty_mods |= crate::ghostty::MOD_SHIFT;
-        }
-        if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-            ghostty_mods |= crate::ghostty::MOD_CTRL;
-        }
-        if modifiers.contains(crossterm::event::KeyModifiers::ALT) {
-            ghostty_mods |= crate::ghostty::MOD_ALT;
-        }
-        event.set_mods(ghostty_mods);
-        event.set_position(column as f32, row as f32);
+        let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
+        let event = ghostty_mouse_event_from_wheel_kind(kind, column, row, modifiers)?;
         encoder.encode(&event).ok()
     }
 
@@ -969,6 +970,302 @@ impl GhosttyPaneTerminal {
 }
 
 #[cfg(feature = "ghostty-vt")]
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_key_event_from_terminal_key(
+    key: crate::input::TerminalKey,
+) -> Option<crate::ghostty::KeyEvent> {
+    let mut event = crate::ghostty::KeyEvent::new().ok()?;
+    event.set_action(match key.kind {
+        crossterm::event::KeyEventKind::Press => {
+            crate::ghostty::ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS
+        }
+        crossterm::event::KeyEventKind::Release => {
+            crate::ghostty::ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_RELEASE
+        }
+        crossterm::event::KeyEventKind::Repeat => {
+            crate::ghostty::ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_REPEAT
+        }
+    });
+    event.set_mods(ghostty_mods_from_key_modifiers(key.modifiers));
+    event.set_key(ghostty_key_from_crossterm_key_code(
+        key.code,
+        key.shifted_codepoint,
+    )?);
+
+    if let Some(text) = ghostty_key_text(key) {
+        event.set_utf8(&text);
+    } else {
+        event.set_utf8("");
+    }
+
+    if let Some(codepoint) = ghostty_unshifted_codepoint(key) {
+        event.set_unshifted_codepoint(codepoint);
+    }
+
+    Some(event)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_prefers_herdr_text_encoding(key: crate::input::TerminalKey) -> bool {
+    matches!(key.code, crossterm::event::KeyCode::Char(_))
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_mods_from_key_modifiers(modifiers: crossterm::event::KeyModifiers) -> u16 {
+    let mut ghostty_mods = 0u16;
+    if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+        ghostty_mods |= crate::ghostty::MOD_SHIFT;
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+        ghostty_mods |= crate::ghostty::MOD_CTRL;
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+        ghostty_mods |= crate::ghostty::MOD_ALT;
+    }
+    if modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+        ghostty_mods |= crate::ghostty::MOD_SUPER;
+    }
+    ghostty_mods
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_mouse_encoder_for_terminal(
+    terminal: &crate::ghostty::Terminal,
+) -> Option<crate::ghostty::MouseEncoder> {
+    let mut encoder = crate::ghostty::MouseEncoder::new().ok()?;
+    encoder.set_from_terminal(terminal);
+    let cols = terminal.cols().ok()? as u32;
+    let rows = terminal.rows().ok()? as u32;
+    encoder.set_size(cols, rows, 1, 1);
+    Some(encoder)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_mouse_event_from_button_kind(
+    kind: crossterm::event::MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: crossterm::event::KeyModifiers,
+) -> Option<crate::ghostty::MouseEvent> {
+    let mut event = crate::ghostty::MouseEvent::new().ok()?;
+    let (action, button) = match kind {
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            (crate::ghostty::MOUSE_ACTION_PRESS, Some(crate::ghostty::MOUSE_BUTTON_LEFT))
+        }
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Middle) => {
+            (crate::ghostty::MOUSE_ACTION_PRESS, Some(crate::ghostty::MOUSE_BUTTON_MIDDLE))
+        }
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+            (crate::ghostty::MOUSE_ACTION_PRESS, Some(crate::ghostty::MOUSE_BUTTON_RIGHT))
+        }
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            (crate::ghostty::MOUSE_ACTION_RELEASE, Some(crate::ghostty::MOUSE_BUTTON_LEFT))
+        }
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Middle) => {
+            (crate::ghostty::MOUSE_ACTION_RELEASE, Some(crate::ghostty::MOUSE_BUTTON_MIDDLE))
+        }
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Right) => {
+            (crate::ghostty::MOUSE_ACTION_RELEASE, Some(crate::ghostty::MOUSE_BUTTON_RIGHT))
+        }
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+            (crate::ghostty::MOUSE_ACTION_MOTION, Some(crate::ghostty::MOUSE_BUTTON_LEFT))
+        }
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Middle) => {
+            (crate::ghostty::MOUSE_ACTION_MOTION, Some(crate::ghostty::MOUSE_BUTTON_MIDDLE))
+        }
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Right) => {
+            (crate::ghostty::MOUSE_ACTION_MOTION, Some(crate::ghostty::MOUSE_BUTTON_RIGHT))
+        }
+        _ => return None,
+    };
+    event.set_action(action);
+    if let Some(button) = button {
+        event.set_button(button);
+    } else {
+        event.clear_button();
+    }
+    event.set_mods(ghostty_mods_from_key_modifiers(modifiers));
+    event.set_position(column as f32, row as f32);
+    Some(event)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_mouse_event_from_wheel_kind(
+    kind: crossterm::event::MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: crossterm::event::KeyModifiers,
+) -> Option<crate::ghostty::MouseEvent> {
+    let mut event = crate::ghostty::MouseEvent::new().ok()?;
+    event.set_action(crate::ghostty::MOUSE_ACTION_PRESS);
+    let button = match kind {
+        crossterm::event::MouseEventKind::ScrollUp => crate::ghostty::MOUSE_BUTTON_WHEEL_UP,
+        crossterm::event::MouseEventKind::ScrollDown => crate::ghostty::MOUSE_BUTTON_WHEEL_DOWN,
+        crossterm::event::MouseEventKind::ScrollLeft => crate::ghostty::MOUSE_BUTTON_WHEEL_LEFT,
+        crossterm::event::MouseEventKind::ScrollRight => crate::ghostty::MOUSE_BUTTON_WHEEL_RIGHT,
+        _ => return None,
+    };
+    event.set_button(button);
+    event.set_mods(ghostty_mods_from_key_modifiers(modifiers));
+    event.set_position(column as f32, row as f32);
+    Some(event)
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_key_text(key: crate::input::TerminalKey) -> Option<String> {
+    match key.code {
+        crossterm::event::KeyCode::Char(c) => Some(
+            key.shifted_codepoint
+                .and_then(char::from_u32)
+                .unwrap_or(c)
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_unshifted_codepoint(key: crate::input::TerminalKey) -> Option<u32> {
+    match key.code {
+        crossterm::event::KeyCode::Char(c) => Some(c as u32),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_key_from_crossterm_key_code(
+    code: crossterm::event::KeyCode,
+    shifted_codepoint: Option<u32>,
+) -> Option<u32> {
+    use crate::ghostty::ffi;
+    use crossterm::event::KeyCode;
+
+    match code {
+        KeyCode::Backspace => Some(ffi::GhosttyKey_GHOSTTY_KEY_BACKSPACE),
+        KeyCode::Enter => Some(ffi::GhosttyKey_GHOSTTY_KEY_ENTER),
+        KeyCode::Left => Some(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_LEFT),
+        KeyCode::Right => Some(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_RIGHT),
+        KeyCode::Up => Some(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_UP),
+        KeyCode::Down => Some(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_DOWN),
+        KeyCode::Home => Some(ffi::GhosttyKey_GHOSTTY_KEY_HOME),
+        KeyCode::End => Some(ffi::GhosttyKey_GHOSTTY_KEY_END),
+        KeyCode::PageUp => Some(ffi::GhosttyKey_GHOSTTY_KEY_PAGE_UP),
+        KeyCode::PageDown => Some(ffi::GhosttyKey_GHOSTTY_KEY_PAGE_DOWN),
+        KeyCode::Tab | KeyCode::BackTab => Some(ffi::GhosttyKey_GHOSTTY_KEY_TAB),
+        KeyCode::Delete => Some(ffi::GhosttyKey_GHOSTTY_KEY_DELETE),
+        KeyCode::Insert => Some(ffi::GhosttyKey_GHOSTTY_KEY_INSERT),
+        KeyCode::Esc => Some(ffi::GhosttyKey_GHOSTTY_KEY_ESCAPE),
+        KeyCode::F(n) => Some(match n {
+            1 => ffi::GhosttyKey_GHOSTTY_KEY_F1,
+            2 => ffi::GhosttyKey_GHOSTTY_KEY_F2,
+            3 => ffi::GhosttyKey_GHOSTTY_KEY_F3,
+            4 => ffi::GhosttyKey_GHOSTTY_KEY_F4,
+            5 => ffi::GhosttyKey_GHOSTTY_KEY_F5,
+            6 => ffi::GhosttyKey_GHOSTTY_KEY_F6,
+            7 => ffi::GhosttyKey_GHOSTTY_KEY_F7,
+            8 => ffi::GhosttyKey_GHOSTTY_KEY_F8,
+            9 => ffi::GhosttyKey_GHOSTTY_KEY_F9,
+            10 => ffi::GhosttyKey_GHOSTTY_KEY_F10,
+            11 => ffi::GhosttyKey_GHOSTTY_KEY_F11,
+            12 => ffi::GhosttyKey_GHOSTTY_KEY_F12,
+            _ => return None,
+        }),
+        KeyCode::Char(c) => ghostty_key_from_char(c, shifted_codepoint),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_key_from_char(c: char, shifted_codepoint: Option<u32>) -> Option<u32> {
+    use crate::ghostty::ffi;
+
+    let base = if let Some(shifted) = shifted_codepoint.and_then(char::from_u32) {
+        ghostty_unshifted_ascii_pair(shifted).unwrap_or(c)
+    } else {
+        c
+    };
+
+    match base.to_ascii_lowercase() {
+        'a' => Some(ffi::GhosttyKey_GHOSTTY_KEY_A),
+        'b' => Some(ffi::GhosttyKey_GHOSTTY_KEY_B),
+        'c' => Some(ffi::GhosttyKey_GHOSTTY_KEY_C),
+        'd' => Some(ffi::GhosttyKey_GHOSTTY_KEY_D),
+        'e' => Some(ffi::GhosttyKey_GHOSTTY_KEY_E),
+        'f' => Some(ffi::GhosttyKey_GHOSTTY_KEY_F),
+        'g' => Some(ffi::GhosttyKey_GHOSTTY_KEY_G),
+        'h' => Some(ffi::GhosttyKey_GHOSTTY_KEY_H),
+        'i' => Some(ffi::GhosttyKey_GHOSTTY_KEY_I),
+        'j' => Some(ffi::GhosttyKey_GHOSTTY_KEY_J),
+        'k' => Some(ffi::GhosttyKey_GHOSTTY_KEY_K),
+        'l' => Some(ffi::GhosttyKey_GHOSTTY_KEY_L),
+        'm' => Some(ffi::GhosttyKey_GHOSTTY_KEY_M),
+        'n' => Some(ffi::GhosttyKey_GHOSTTY_KEY_N),
+        'o' => Some(ffi::GhosttyKey_GHOSTTY_KEY_O),
+        'p' => Some(ffi::GhosttyKey_GHOSTTY_KEY_P),
+        'q' => Some(ffi::GhosttyKey_GHOSTTY_KEY_Q),
+        'r' => Some(ffi::GhosttyKey_GHOSTTY_KEY_R),
+        's' => Some(ffi::GhosttyKey_GHOSTTY_KEY_S),
+        't' => Some(ffi::GhosttyKey_GHOSTTY_KEY_T),
+        'u' => Some(ffi::GhosttyKey_GHOSTTY_KEY_U),
+        'v' => Some(ffi::GhosttyKey_GHOSTTY_KEY_V),
+        'w' => Some(ffi::GhosttyKey_GHOSTTY_KEY_W),
+        'x' => Some(ffi::GhosttyKey_GHOSTTY_KEY_X),
+        'y' => Some(ffi::GhosttyKey_GHOSTTY_KEY_Y),
+        'z' => Some(ffi::GhosttyKey_GHOSTTY_KEY_Z),
+        '0' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_0),
+        '1' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_1),
+        '2' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_2),
+        '3' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_3),
+        '4' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_4),
+        '5' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_5),
+        '6' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_6),
+        '7' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_7),
+        '8' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_8),
+        '9' => Some(ffi::GhosttyKey_GHOSTTY_KEY_DIGIT_9),
+        '`' => Some(ffi::GhosttyKey_GHOSTTY_KEY_BACKQUOTE),
+        '\\' => Some(ffi::GhosttyKey_GHOSTTY_KEY_BACKSLASH),
+        '[' => Some(ffi::GhosttyKey_GHOSTTY_KEY_BRACKET_LEFT),
+        ']' => Some(ffi::GhosttyKey_GHOSTTY_KEY_BRACKET_RIGHT),
+        ',' => Some(ffi::GhosttyKey_GHOSTTY_KEY_COMMA),
+        '=' => Some(ffi::GhosttyKey_GHOSTTY_KEY_EQUAL),
+        '-' => Some(ffi::GhosttyKey_GHOSTTY_KEY_MINUS),
+        '.' => Some(ffi::GhosttyKey_GHOSTTY_KEY_PERIOD),
+        '\'' => Some(ffi::GhosttyKey_GHOSTTY_KEY_QUOTE),
+        ';' => Some(ffi::GhosttyKey_GHOSTTY_KEY_SEMICOLON),
+        '/' => Some(ffi::GhosttyKey_GHOSTTY_KEY_SLASH),
+        ' ' => Some(ffi::GhosttyKey_GHOSTTY_KEY_SPACE),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ghostty-vt")]
+fn ghostty_unshifted_ascii_pair(c: char) -> Option<char> {
+    Some(match c {
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => return None,
+    })
+}
+
 fn ghostty_visible_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {
     let GhosttyPaneCore {
         terminal,
@@ -1679,8 +1976,10 @@ impl PaneRuntime {
     }
 
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
-        let flags = self.kitty_keyboard_flags.load(Ordering::Relaxed);
-        crate::input::KeyboardProtocol::from_kitty_flags(flags)
+        let fallback = crate::input::KeyboardProtocol::from_kitty_flags(
+            self.kitty_keyboard_flags.load(Ordering::Relaxed),
+        );
+        self.terminal.keyboard_protocol(fallback)
     }
 
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
@@ -1777,6 +2076,112 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_keyboard_protocol_tracks_live_terminal_flags() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>3u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        assert_eq!(
+            pane.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 3 })
+        );
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_plain_text_chars_still_encode_as_text() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+
+        assert_eq!(encoded, b"a");
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_char_keys_still_use_herdr_encoding() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>1u");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+
+        assert_eq!(encoded, vec![1]);
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_key_encoding_honors_application_cursor_mode() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.mode_set(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS, true).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            crate::input::KeyboardProtocol::Legacy,
+        );
+
+        assert_eq!(encoded, b"\x1bOA");
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_mouse_button_encoding_uses_live_terminal_state() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1000h\x1b[?1006h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            11,
+            9,
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(encoded.as_deref(), Some(&b"\x1b[<0;12;10m"[..]));
+    }
+
+    #[cfg(feature = "ghostty-vt")]
+    #[test]
+    fn ghostty_mouse_drag_encoding_uses_motion_reporting_state() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1002h\x1b[?1006h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            4,
+            6,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+
+        assert_eq!(encoded.as_deref(), Some(&b"\x1b[<36;5;7M"[..]));
+    }
 
     #[test]
     fn recent_text_reconstructs_scrollback_tail() {
