@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use tokio::sync::{mpsc, Notify};
@@ -36,7 +36,7 @@ pub struct SessionSnapshot {
     pub sidebar_width: Option<u16>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
@@ -46,30 +46,6 @@ pub struct WorkspaceSnapshot {
     pub tabs: Vec<TabSnapshot>,
     #[serde(default)]
     pub active_tab: usize,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceSnapshotWire {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    custom_name: Option<String>,
-    #[serde(default)]
-    identity_cwd: Option<PathBuf>,
-    #[serde(default)]
-    tabs: Vec<TabSnapshot>,
-    #[serde(default)]
-    active_tab: usize,
-    #[serde(default)]
-    layout: Option<LayoutSnapshot>,
-    #[serde(default)]
-    panes: HashMap<u32, PaneSnapshot>,
-    #[serde(default)]
-    zoomed: Option<bool>,
-    #[serde(default)]
-    focused: Option<u32>,
-    #[serde(default)]
-    root_pane: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -143,41 +119,49 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkspaceSnapshot {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let snap = WorkspaceSnapshotWire::deserialize(deserializer)?;
+#[derive(Deserialize)]
+struct RawSessionSnapshot {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    workspaces: Vec<serde_json::Value>,
+    #[serde(default)]
+    active: Option<usize>,
+    #[serde(default)]
+    selected: usize,
+    #[serde(default)]
+    agent_panel_scope: crate::app::state::AgentPanelScope,
+    #[serde(default)]
+    sidebar_width: Option<u16>,
+}
 
-        if let Some(identity_cwd) = snap.identity_cwd {
-            return Ok(Self {
-                id: snap.id,
-                custom_name: snap.custom_name,
-                identity_cwd,
-                tabs: snap.tabs,
-                active_tab: snap.active_tab,
-            });
-        }
+fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
+    Ok(SessionSnapshot {
+        version: raw.version,
+        workspaces: raw
+            .workspaces
+            .into_iter()
+            .map(migrate_workspace)
+            .collect::<Result<Vec<_>, _>>()?,
+        active: raw.active,
+        selected: raw.selected,
+        agent_panel_scope: raw.agent_panel_scope,
+        sidebar_width: raw.sidebar_width,
+    })
+}
 
-        if let Some(layout) = snap.layout {
-            // Backward-compat path for pre-tab session snapshots (<= v0.2.4).
-            // Remove this migration once we intentionally drop support for v2 sessions.
-            return Ok(LegacyWorkspaceSnapshot {
-                custom_name: snap.custom_name,
-                layout,
-                panes: snap.panes,
-                zoomed: snap.zoomed.unwrap_or(false),
-                focused: snap.focused,
-                root_pane: snap.root_pane,
-            }
-            .into());
-        }
-
-        Err(<D::Error as serde::de::Error>::custom(
-            "workspace snapshot is neither current nor legacy format",
-        ))
+fn migrate_workspace(raw: serde_json::Value) -> Result<WorkspaceSnapshot, String> {
+    if raw.get("identity_cwd").is_some() {
+        return serde_json::from_value(raw).map_err(|e| e.to_string());
     }
+
+    if raw.get("layout").is_some() {
+        let legacy =
+            serde_json::from_value::<LegacyWorkspaceSnapshot>(raw).map_err(|e| e.to_string())?;
+        return Ok(legacy.into());
+    }
+
+    Err("workspace snapshot is neither current nor legacy format".to_string())
 }
 
 fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
@@ -520,6 +504,17 @@ pub fn save(snapshot: &SessionSnapshot) {
     info!(workspaces = snapshot.workspaces.len(), "session saved");
 }
 
+fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
+    let raw = serde_json::from_str::<RawSessionSnapshot>(content).map_err(|e| e.to_string())?;
+    if raw.version > SNAPSHOT_VERSION {
+        return Err(format!(
+            "snapshot version {} is newer than supported {}",
+            raw.version, SNAPSHOT_VERSION
+        ));
+    }
+    migrate_snapshot(raw)
+}
+
 pub fn load() -> Option<SessionSnapshot> {
     let path = session_path();
     if !path.exists() {
@@ -532,19 +527,19 @@ pub fn load() -> Option<SessionSnapshot> {
             return None;
         }
     };
-    match serde_json::from_str::<SessionSnapshot>(&content) {
-        Ok(snap) => {
-            if snap.version > SNAPSHOT_VERSION {
-                warn!(
-                    file_version = snap.version,
-                    supported = SNAPSHOT_VERSION,
-                    "session file is from a newer herdr version, ignoring"
-                );
-                return None;
-            }
-            Some(snap)
-        }
+    match parse_snapshot(&content) {
+        Ok(snap) => Some(snap),
         Err(e) => {
+            if let Ok(raw) = serde_json::from_str::<RawSessionSnapshot>(&content) {
+                if raw.version > SNAPSHOT_VERSION {
+                    warn!(
+                        file_version = raw.version,
+                        supported = SNAPSHOT_VERSION,
+                        "session file is from a newer herdr version, ignoring"
+                    );
+                    return None;
+                }
+            }
             warn!(err = %e, "failed to parse session file, ignoring");
             None
         }
@@ -557,6 +552,19 @@ pub fn load() -> Option<SessionSnapshot> {
 mod tests {
     use super::*;
 
+    fn session_fixture(name: &str) -> &'static str {
+        match name {
+            "current-herdr" => include_str!("../tests/fixtures/session/current-herdr-session.json"),
+            "current-herdr-dev" => {
+                include_str!("../tests/fixtures/session/current-herdr-dev-session.json")
+            }
+            "legacy-pre-tabs-v2" => {
+                include_str!("../tests/fixtures/session/legacy-pre-tabs-v2.json")
+            }
+            other => panic!("unknown session fixture: {other}"),
+        }
+    }
+
     #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
@@ -568,7 +576,7 @@ mod tests {
             sidebar_width: Some(26),
         };
         let json = serde_json::to_string(&snap).unwrap();
-        let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
         assert!(restored.workspaces.is_empty());
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
@@ -641,7 +649,7 @@ mod tests {
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
-        let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
 
         assert_eq!(restored.workspaces.len(), 1);
         assert_eq!(restored.workspaces[0].id.as_deref(), Some("wproj"));
@@ -663,6 +671,40 @@ mod tests {
     }
 
     #[test]
+    fn current_session_fixture_parses() {
+        let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
+
+        assert_eq!(snap.version, 3);
+        assert_eq!(snap.workspaces.len(), 2);
+        assert_eq!(snap.active, Some(0));
+        assert_eq!(snap.selected, 0);
+        assert_eq!(
+            snap.agent_panel_scope,
+            crate::app::state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(snap.sidebar_width, None);
+        assert_eq!(snap.workspaces[0].tabs.len(), 2);
+        assert_eq!(
+            snap.workspaces[1].identity_cwd,
+            PathBuf::from("/home/test/projects/project-b")
+        );
+    }
+
+    #[test]
+    fn current_dev_session_fixture_parses_additive_fields() {
+        let snap = parse_snapshot(session_fixture("current-herdr-dev")).unwrap();
+
+        assert_eq!(snap.version, 3);
+        assert_eq!(snap.workspaces.len(), 2);
+        assert_eq!(
+            snap.agent_panel_scope,
+            crate::app::state::AgentPanelScope::CurrentWorkspace
+        );
+        assert_eq!(snap.workspaces[0].active_tab, 1);
+        assert_eq!(snap.workspaces[1].tabs[0].panes.len(), 2);
+    }
+
+    #[test]
     fn old_snapshot_defaults_agent_panel_scope() {
         let json = serde_json::json!({
             "version": SNAPSHOT_VERSION,
@@ -672,7 +714,7 @@ mod tests {
         })
         .to_string();
 
-        let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
 
         assert_eq!(
             restored.agent_panel_scope,
@@ -683,34 +725,19 @@ mod tests {
 
     #[test]
     fn legacy_workspace_snapshot_migrates_to_single_tab() {
-        let json = serde_json::json!({
-            "version": 2,
-            "workspaces": [{
-                "custom_name": "legacy",
-                "layout": LayoutSnapshot::Pane(0),
-                "panes": {
-                    "0": { "cwd": "/tmp/pion" }
-                },
-                "zoomed": false,
-                "focused": 0,
-                "root_pane": 0
-            }],
-            "active": 0,
-            "selected": 0
-        })
-        .to_string();
-
-        let snap: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let snap = parse_snapshot(session_fixture("legacy-pre-tabs-v2")).unwrap();
         let ws = &snap.workspaces[0];
 
+        assert_eq!(snap.version, 2);
         assert_eq!(snap.workspaces.len(), 1);
         assert_eq!(ws.custom_name.as_deref(), Some("legacy"));
         assert_eq!(ws.identity_cwd, PathBuf::from("/tmp/pion"));
         assert_eq!(ws.active_tab, 0);
         assert_eq!(ws.tabs.len(), 1);
-        assert_eq!(ws.tabs[0].focused, Some(0));
+        assert_eq!(ws.tabs[0].focused, Some(1));
         assert_eq!(ws.tabs[0].root_pane, Some(0));
         assert_eq!(ws.tabs[0].panes[&0].cwd, PathBuf::from("/tmp/pion"));
+        assert_eq!(ws.tabs[0].panes[&1].cwd, PathBuf::from("/tmp/herdr"));
     }
 
     #[test]
@@ -742,16 +769,14 @@ mod tests {
     fn old_unversioned_snapshot_loads_as_version_0() {
         // Simulate a snapshot from before versioning was added
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
-        let snap: SessionSnapshot = serde_json::from_str(json).unwrap();
-        assert_eq!(snap.version, 0); // #[serde(default)] gives 0
+        let snap = parse_snapshot(json).unwrap();
+        assert_eq!(snap.version, 0);
     }
 
     #[test]
     fn future_version_is_rejected() {
         let json = r#"{"version":999,"workspaces":[],"active":null,"selected":0}"#;
-        let snap: SessionSnapshot = serde_json::from_str(json).unwrap();
-        assert!(snap.version > SNAPSHOT_VERSION);
-        // load() would reject this — tested via the version check in load()
+        assert!(parse_snapshot(json).is_err());
     }
 
     #[test]
