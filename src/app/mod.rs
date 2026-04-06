@@ -213,6 +213,7 @@ impl App {
                 preview: notes.preview,
             }),
             keybind_help: state::KeybindHelpState { scroll: 0 },
+            workspace_scroll: 0,
             view: state::ViewState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),

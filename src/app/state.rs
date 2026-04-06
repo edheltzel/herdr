@@ -461,6 +461,9 @@ pub(crate) enum DragTarget {
         source_ws_idx: usize,
         insert_idx: Option<usize>,
     },
+    WorkspaceListScrollbar {
+        grab_row_offset: u16,
+    },
     PaneSplit {
         path: Vec<bool>,
         direction: Direction,
@@ -562,6 +565,7 @@ pub struct AppState {
     pub onboarding_list: SelectionListState,
     pub release_notes: Option<ReleaseNotesState>,
     pub keybind_help: KeybindHelpState,
+    pub workspace_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -660,6 +664,7 @@ impl AppState {
             onboarding_list: SelectionListState::new(1),
             release_notes: None,
             keybind_help: KeybindHelpState { scroll: 0 },
+            workspace_scroll: 0,
             view: ViewState {
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),

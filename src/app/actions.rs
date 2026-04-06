@@ -106,8 +106,39 @@ impl AppState {
         if idx < self.workspaces.len() {
             self.active = Some(idx);
             self.selected = idx;
+            self.ensure_workspace_visible(idx);
             if let Some(ws) = self.workspaces.get_mut(idx) {
                 ws.switch_tab(ws.active_tab);
+            }
+        }
+    }
+
+    pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
+        if self.sidebar_collapsed || idx >= self.workspaces.len() {
+            return;
+        }
+
+        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
+        if cards.is_empty() {
+            self.workspace_scroll = idx;
+            return;
+        }
+
+        let first_idx = cards.first().map(|card| card.ws_idx).unwrap_or(0);
+        if idx < first_idx {
+            self.workspace_scroll = idx;
+            return;
+        }
+
+        while cards.last().map(|card| card.ws_idx).unwrap_or(idx) < idx {
+            let previous_scroll = self.workspace_scroll;
+            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
+            if self.workspace_scroll == previous_scroll {
+                break;
+            }
+            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
+            if cards.is_empty() {
+                break;
             }
         }
     }
@@ -162,6 +193,7 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        self.ensure_workspace_visible(self.selected);
     }
 
     pub fn next_tab(&mut self) {
@@ -196,11 +228,16 @@ impl AppState {
         if self.workspaces.is_empty() {
             self.active = None;
             self.selected = 0;
+            self.workspace_scroll = 0;
         } else {
             if self.selected >= self.workspaces.len() {
                 self.selected = self.workspaces.len() - 1;
             }
             self.active = Some(self.selected);
+            self.workspace_scroll = self
+                .workspace_scroll
+                .min(self.workspaces.len().saturating_sub(1));
+            self.ensure_workspace_visible(self.selected);
         }
     }
 }
@@ -540,6 +577,21 @@ mod tests {
         state.switch_workspace(2);
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn switch_workspace_keeps_selected_visible_in_scrolled_sidebar() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+
+        state.switch_workspace(7);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+
+        assert!(state
+            .view
+            .workspace_card_areas
+            .iter()
+            .any(|card| card.ws_idx == 7));
     }
 
     #[test]

@@ -50,6 +50,10 @@ pub fn compute_view(app: &mut AppState, area: Rect) {
         (Rect::default(), main_area)
     };
 
+    app.workspace_scroll = app
+        .workspace_scroll
+        .min(app.workspaces.len().saturating_sub(1));
+
     let workspace_card_areas = if app.sidebar_collapsed {
         Vec::new()
     } else {
@@ -131,31 +135,114 @@ pub fn render(app: &AppState, frame: &mut Frame) {
 
 const MIN_TAB_WIDTH: u16 = 8;
 const NEW_TAB_WIDTH: u16 = 3;
+const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+
+fn workspace_row_height(ws: &crate::workspace::Workspace) -> u16 {
+    if ws.branch().is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+pub(crate) fn workspace_list_rect(area: Rect) -> Rect {
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height == 0 {
+        return Rect::default();
+    }
+
+    let total_h = content.height as usize;
+    let ws_h = (total_h + 1) / 2;
+    Rect::new(content.x, content.y, content.width, ws_h as u16)
+}
+
+pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
+    if area.width == 0 || area.height <= WORKSPACE_SECTION_HEADER_ROWS {
+        return Rect::default();
+    }
+
+    let body_y = area.y.saturating_add(WORKSPACE_SECTION_HEADER_ROWS);
+    let footer_y = area.y + area.height.saturating_sub(1);
+    let body_height = footer_y.saturating_sub(body_y);
+    let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
+    Rect::new(area.x, body_y, body_width, body_height)
+}
+
+fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
+    let body = workspace_list_body_rect(area, false);
+    if body.width == 0 || body.height == 0 {
+        return 0;
+    }
+
+    let mut used_rows = 0u16;
+    let mut visible = 0usize;
+    for ws in app.workspaces.iter().skip(scroll) {
+        let needed = workspace_row_height(ws).saturating_add(1);
+        if used_rows.saturating_add(needed) > body.height {
+            break;
+        }
+        used_rows = used_rows.saturating_add(needed);
+        visible += 1;
+    }
+    visible
+}
+
+pub(crate) fn workspace_list_scroll_metrics(
+    app: &AppState,
+    area: Rect,
+) -> crate::pane::ScrollMetrics {
+    let viewport_rows = workspace_list_visible_count(app, area, app.workspace_scroll);
+    let total_rows = app.workspaces.len();
+    let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
+    let offset_from_bottom = total_rows
+        .saturating_sub(app.workspace_scroll)
+        .saturating_sub(viewport_rows);
+
+    crate::pane::ScrollMetrics {
+        offset_from_bottom,
+        max_offset_from_bottom,
+        viewport_rows,
+    }
+}
+
+pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
+    let metrics = workspace_list_scroll_metrics(app, area);
+    let body = workspace_list_body_rect(area, true);
+    (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
+        area.x + area.width.saturating_sub(1),
+        body.y,
+        1,
+        body.height,
+    ))
+}
 
 pub(crate) fn compute_workspace_card_areas(
     app: &AppState,
     area: Rect,
 ) -> Vec<crate::app::state::WorkspaceCardArea> {
-    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height == 0 {
+    let ws_area = workspace_list_rect(area);
+    if ws_area == Rect::default() {
         return Vec::new();
     }
 
-    let total_h = content.height as usize;
-    let ws_h = (total_h + 1) / 2;
-    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
-    let list_bottom = ws_area.y + ws_area.height.saturating_sub(1);
-    let mut row_y = ws_area.y.saturating_add(2);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+
+    let mut row_y = body.y;
+    let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
 
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
-        if row_y + 1 >= list_bottom {
+    for (ws_idx, ws) in app.workspaces.iter().enumerate().skip(app.workspace_scroll) {
+        let row_height = workspace_row_height(ws);
+        if row_y.saturating_add(row_height).saturating_add(1) > body_bottom {
             break;
         }
-        let row_height = if ws.branch().is_some() { 2 } else { 1 };
         cards.push(crate::app::state::WorkspaceCardArea {
             ws_idx,
-            rect: Rect::new(ws_area.x, row_y, ws_area.width, row_height),
+            rect: Rect::new(body.x, row_y, body.width, row_height),
         });
         row_y = row_y.saturating_add(row_height + 1);
     }
@@ -428,17 +515,19 @@ pub(crate) fn workspace_drop_indicator_row(
         return None;
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
-    if insert_idx == 0 {
-        return cards
-            .first()
-            .and_then(|card| card.rect.y.checked_sub(1))
-            .filter(|y| *y < list_bottom);
+
+    let first = cards.first()?;
+    if insert_idx == first.ws_idx {
+        return first.rect.y.checked_sub(1).filter(|y| *y < list_bottom);
     }
-    if let Some(card) = cards.get(insert_idx) {
+
+    if let Some(card) = cards.iter().find(|card| card.ws_idx == insert_idx) {
         return card.rect.y.checked_sub(1).filter(|y| *y < list_bottom);
     }
+
     cards
         .last()
+        .filter(|card| insert_idx == card.ws_idx.saturating_add(1))
         .map(|card| card.rect.y.saturating_add(card.rect.height))
         .filter(|y| *y < list_bottom)
 }
@@ -523,26 +612,22 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
             Rect::new(area.x, area.y, area.width, 1),
         );
     }
-    let mut row_y = area.y.saturating_add(1);
 
-    // Blank line for breathing room
-    row_y = row_y.saturating_add(1);
+    let metrics = workspace_list_scroll_metrics(app, area);
+    let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
+    let cards = &app.view.workspace_card_areas;
 
-    for (i, ws) in app.workspaces.iter().enumerate() {
-        if row_y + 1 >= list_bottom {
-            break;
-        }
+    for card in cards {
+        let i = card.ws_idx;
+        let ws = &app.workspaces[i];
+        let row_y = card.rect.y;
+        let row_height = card.rect.height;
         let selected = i == app.selected && is_navigating;
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
-        let highlighted = selected || is_active || is_dragged; // active always gets a bg
+        let highlighted = selected || is_active || is_dragged;
         let (agg_state, agg_seen) = ws.aggregate_state();
 
-        // Determine row height for background fill
-        let has_second_line = ws.branch().is_some();
-        let row_height: u16 = if has_second_line { 2 } else { 1 };
-
-        // Background fill: selected gets brighter surface, active gets subtle surface
         if highlighted {
             let bg = if selected {
                 p.surface0
@@ -556,25 +641,23 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
                 if y >= list_bottom {
                     break;
                 }
-                for x in area.x..area.x + area.width {
+                for x in card.rect.x..card.rect.x + card.rect.width {
                     buf[(x, y)].set_style(Style::default().bg(bg));
                 }
             }
         }
 
-        // Accent bar on the left edge for active workspace
         if is_active {
             let buf = frame.buffer_mut();
             for y in row_y..row_y + row_height {
                 if y >= list_bottom {
                     break;
                 }
-                buf[(area.x, y)].set_symbol("▌");
-                buf[(area.x, y)].set_style(Style::default().fg(p.accent));
+                buf[(card.rect.x, y)].set_symbol("▌");
+                buf[(card.rect.x, y)].set_style(Style::default().fg(p.accent));
             }
         }
 
-        // Styles — active workspace is always visible, selected (nav mode) is brightest
         let name_style = if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -586,26 +669,21 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
             Style::default().fg(p.overlay0)
         };
 
-        // Line 1: marker-space + number + name + aggregate state dot
-        let marker = if is_active { " " } else { " " }; // accent bar handles active indicator
         let mut line1 = vec![
-            Span::styled(marker, Style::default()),
+            Span::styled(" ", Style::default()),
             Span::styled(format!("{} ", i + 1), num_style),
             Span::styled(ws.display_name(), name_style),
             Span::styled(" ", Style::default()),
         ];
-
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
         line1.push(Span::styled(icon, icon_style));
 
         frame.render_widget(
             Paragraph::new(Line::from(line1)),
-            Rect::new(area.x, row_y, area.width, 1),
+            Rect::new(card.rect.x, row_y, card.rect.width, 1),
         );
-        row_y += 1;
 
-        // Line 2: branch
-        if row_y < list_bottom {
+        if row_height > 1 && row_y + 1 < list_bottom {
             if let Some(branch) = ws.branch() {
                 let upstream_label = ws.git_ahead_behind().and_then(|(ahead, behind)| {
                     let mut parts = Vec::new();
@@ -623,7 +701,7 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
                         parts.iter().map(|(label, _)| label.len()).sum::<usize>() + parts.len()
                     })
                     .unwrap_or(0);
-                let max_branch_len = (area.width as usize).saturating_sub(5 + reserved);
+                let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
                 let branch_display = if branch.len() > max_branch_len {
                     format!("{}…", &branch[..max_branch_len.saturating_sub(1)])
                 } else {
@@ -647,25 +725,27 @@ fn render_workspace_list(app: &AppState, frame: &mut Frame, area: Rect, is_navig
                         spans.push(Span::styled(label, Style::default().fg(color)));
                     }
                 }
-                let line2 = Line::from(spans);
                 frame.render_widget(
-                    Paragraph::new(line2),
-                    Rect::new(area.x, row_y, area.width, 1),
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(card.rect.x, row_y + 1, card.rect.width, 1),
                 );
-                row_y += 1;
             }
         }
-
-        // Spacing between workspace cards
-        row_y += 1;
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
+        let indicator_right = scrollbar_rect
+            .map(|rect| rect.x)
+            .unwrap_or(area.x + area.width);
         let buf = frame.buffer_mut();
-        for x in area.x..area.x + area.width {
+        for x in area.x..indicator_right {
             buf[(x, y)].set_symbol("─");
             buf[(x, y)].set_style(Style::default().fg(p.accent));
         }
+    }
+
+    if let Some(track) = scrollbar_rect {
+        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
 
     // Footer actions for workspace section

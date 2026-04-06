@@ -719,11 +719,13 @@ fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Up => {
             if state.selected > 0 {
                 state.selected -= 1;
+                state.ensure_workspace_visible(state.selected);
             }
         }
         KeyCode::Down => {
             if !state.workspaces.is_empty() && state.selected < state.workspaces.len() - 1 {
                 state.selected += 1;
+                state.ensure_workspace_visible(state.selected);
             }
         }
         KeyCode::Char('h') | KeyCode::Left => state.navigate_pane(NavDirection::Left),
@@ -1404,15 +1406,71 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let content = Rect::new(
-            sidebar.x,
-            sidebar.y,
-            sidebar.width.saturating_sub(1),
-            sidebar.height,
-        );
-        let total_h = content.height as usize;
-        let ws_h = (total_h + 1) / 2;
-        Rect::new(content.x, content.y, content.width, ws_h as u16)
+        crate::ui::workspace_list_rect(sidebar)
+    }
+
+    fn workspace_list_scrollbar_target_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<ScrollbarClickTarget> {
+        let area = self.workspace_list_rect();
+        let metrics = crate::ui::workspace_list_scroll_metrics(self, area);
+        let track = crate::ui::workspace_list_scrollbar_rect(self, area)?;
+        if col < track.x
+            || col >= track.x + track.width
+            || row < track.y
+            || row >= track.y + track.height
+        {
+            return None;
+        }
+        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(metrics, track, row) {
+            Some(ScrollbarClickTarget::Thumb { grab_row_offset })
+        } else {
+            Some(ScrollbarClickTarget::Track {
+                offset_from_bottom: crate::ui::scrollbar_offset_from_row(metrics, track, row),
+            })
+        }
+    }
+
+    fn workspace_list_offset_for_drag_row(&self, row: u16, grab_row_offset: u16) -> Option<usize> {
+        let area = self.workspace_list_rect();
+        let metrics = crate::ui::workspace_list_scroll_metrics(self, area);
+        let track = crate::ui::workspace_list_scrollbar_rect(self, area)?;
+        Some(crate::ui::scrollbar_offset_from_drag_row(
+            metrics,
+            track,
+            row,
+            grab_row_offset,
+        ))
+    }
+
+    fn set_workspace_list_offset_from_bottom(&mut self, offset_from_bottom: usize) {
+        let area = self.workspace_list_rect();
+        let metrics = crate::ui::workspace_list_scroll_metrics(self, area);
+        self.workspace_scroll = metrics
+            .max_offset_from_bottom
+            .saturating_sub(offset_from_bottom);
+    }
+
+    fn scroll_workspace_list(&mut self, delta: i16) {
+        if delta.is_negative() {
+            self.workspace_scroll = self
+                .workspace_scroll
+                .saturating_sub(delta.unsigned_abs() as usize);
+            return;
+        }
+
+        for _ in 0..delta as usize {
+            let cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
+            let Some(last) = cards.last() else {
+                break;
+            };
+            if last.ws_idx + 1 >= self.workspaces.len() {
+                break;
+            }
+            self.workspace_scroll = self.workspace_scroll.saturating_add(1);
+        }
     }
 
     pub(crate) fn sidebar_footer_rect(&self) -> Rect {
@@ -1908,6 +1966,22 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some(target) =
+                        self.workspace_list_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
+                                self.drag = Some(DragState {
+                                    target: DragTarget::WorkspaceListScrollbar { grab_row_offset },
+                                });
+                            }
+                            ScrollbarClickTarget::Track { offset_from_bottom } => {
+                                self.set_workspace_list_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_press = Some(WorkspacePressState {
                             ws_idx: idx,
@@ -1997,6 +2071,13 @@ impl AppState {
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
                         DragTarget::WorkspaceReorder { .. } => {}
+                        DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
+                            if let Some(offset_from_bottom) =
+                                self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
+                            {
+                                self.set_workspace_list_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
                         DragTarget::PaneSplit {
                             path,
                             direction,
@@ -2097,13 +2178,25 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                if self.selected > 0 {
+                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                    self,
+                    self.workspace_list_rect(),
+                )) {
+                    self.scroll_workspace_list(-1);
+                } else if self.selected > 0 {
                     self.selected -= 1;
+                    self.ensure_workspace_visible(self.selected);
                 }
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                if !self.workspaces.is_empty() && self.selected < self.workspaces.len() - 1 {
+                if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
+                    self,
+                    self.workspace_list_rect(),
+                )) {
+                    self.scroll_workspace_list(1);
+                } else if !self.workspaces.is_empty() && self.selected < self.workspaces.len() - 1 {
                     self.selected += 1;
+                    self.ensure_workspace_visible(self.selected);
                 }
             }
 
@@ -2115,6 +2208,12 @@ impl AppState {
             }
 
             MouseEventKind::Down(MouseButton::Right) if in_sidebar && !self.sidebar_collapsed => {
+                if self
+                    .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
+                    .is_some()
+                {
+                    return None;
+                }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
                     self.context_menu = Some(ContextMenuState {
@@ -2240,8 +2339,13 @@ impl AppState {
             return Some(0);
         }
 
+        let mut insert_indices = Vec::with_capacity(cards.len() + 1);
+        insert_indices.push(cards[0].ws_idx);
+        insert_indices.extend(cards.iter().skip(1).map(|card| card.ws_idx));
+        insert_indices.push(cards.last().map(|card| card.ws_idx + 1).unwrap_or(0));
+
         let mut best: Option<(usize, u16)> = None;
-        for insert_idx in 0..=cards.len() {
+        for insert_idx in insert_indices {
             let Some(slot_row) = crate::ui::workspace_drop_indicator_row(&cards, area, insert_idx)
             else {
                 continue;
