@@ -447,7 +447,30 @@ fn compute_sidebar_width(app: &AppState) -> u16 {
         .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
 }
 
-/// Collapsed sidebar: pure glance mode.
+pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height == 0 {
+        return (Rect::default(), None, Rect::default());
+    }
+
+    if content.height < 7 {
+        return (content, None, Rect::default());
+    }
+
+    let total_h = content.height as usize;
+    let ws_h = (total_h + 1) / 2;
+    let detail_h = total_h.saturating_sub(ws_h + 1);
+    if ws_h == 0 || detail_h == 0 {
+        return (content, None, Rect::default());
+    }
+
+    let divider_y = content.y + ws_h as u16;
+    let ws_area = Rect::new(content.x, content.y, content.width, ws_h as u16);
+    let detail_area = Rect::new(content.x, divider_y + 1, content.width, detail_h as u16);
+    (ws_area, Some(divider_y), detail_area)
+}
+
+/// Collapsed sidebar: workspace glance on top, compact agent list below.
 fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
@@ -464,17 +487,20 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let content_w = area.width.saturating_sub(1);
-    let bottom_y = area.y + area.height.saturating_sub(1);
+    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    if ws_area == Rect::default() {
+        render_sidebar_toggle(app, frame, area, true, p);
+        return;
+    }
 
-    for (i, ws) in app.workspaces.iter().enumerate() {
-        let y = area.y + i as u16;
-        if y >= bottom_y {
+    for (visible_idx, ws) in app.workspaces.iter().enumerate() {
+        let y = ws_area.y + visible_idx as u16;
+        if y >= ws_area.y + ws_area.height {
             break;
         }
         let (agg_state, agg_seen) = ws.aggregate_state();
         let (icon, icon_style) = state_dot(agg_state, agg_seen, p);
-        let is_selected = i == app.selected && is_navigating;
+        let is_selected = visible_idx == app.selected && is_navigating;
         let row_style = if is_selected {
             Style::default().bg(p.surface0)
         } else {
@@ -488,19 +514,65 @@ fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
 
         if is_selected {
             let buf = frame.buffer_mut();
-            for x in area.x..area.x + content_w {
+            for x in ws_area.x..ws_area.x + ws_area.width {
                 buf[(x, y)].set_style(row_style);
             }
         }
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(format!("{}", i + 1), num_style),
+                Span::styled(format!("{}", visible_idx + 1), num_style),
                 Span::styled(" ", row_style),
                 Span::styled(icon, icon_style),
             ])),
-            Rect::new(area.x, y, content_w, 1),
+            Rect::new(ws_area.x, y, ws_area.width, 1),
         );
+    }
+
+    if let Some(divider_y) = divider_y {
+        let buf = frame.buffer_mut();
+        for x in ws_area.x..ws_area.x + ws_area.width {
+            buf[(x, divider_y)].set_symbol("─");
+            buf[(x, divider_y)].set_style(Style::default().fg(p.surface_dim));
+        }
+    }
+
+    let detail_ws_idx = if is_navigating {
+        Some(app.selected)
+    } else {
+        app.active
+    };
+    let detail_content_area = Rect::new(
+        detail_area.x,
+        detail_area.y,
+        detail_area.width,
+        detail_area.height.saturating_sub(1),
+    );
+    if detail_content_area != Rect::default() {
+        if let Some(ws_idx) = detail_ws_idx {
+            if let Some(ws) = app.workspaces.get(ws_idx) {
+                for (detail_idx, detail) in ws.pane_details().iter().enumerate() {
+                    let y = detail_content_area.y + detail_idx as u16;
+                    if y >= detail_content_area.y + detail_content_area.height {
+                        break;
+                    }
+                    let pane_num = ws
+                        .public_pane_number(detail.pane_id)
+                        .unwrap_or(detail_idx + 1);
+                    let pane_style = Style::default().fg(p.overlay0);
+                    let (icon, icon_style) =
+                        agent_icon(detail.state, detail.seen, app.spinner_tick, p);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::styled(format!("{pane_num}"), pane_style),
+                            Span::styled(" ", pane_style),
+                            Span::styled(icon, icon_style),
+                        ])),
+                        Rect::new(detail_content_area.x, y, detail_content_area.width, 1),
+                    );
+                }
+            }
+        }
     }
 
     render_sidebar_toggle(app, frame, area, true, p);

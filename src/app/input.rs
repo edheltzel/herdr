@@ -1971,9 +1971,20 @@ impl AppState {
 
                 if in_sidebar {
                     if self.sidebar_collapsed {
-                        let idx = (mouse.row - sidebar.y) as usize;
-                        if idx < self.workspaces.len() {
+                        if let Some(idx) = self.collapsed_workspace_at_row(mouse.row) {
                             self.switch_workspace(idx);
+                            self.mode = Mode::Terminal;
+                            return None;
+                        }
+
+                        if let Some((ws_idx, tab_idx, pane_id)) =
+                            self.collapsed_agent_detail_target_at(mouse.row)
+                        {
+                            self.switch_workspace(ws_idx);
+                            if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+                                ws.switch_tab(tab_idx);
+                                ws.layout.focus_pane(pane_id);
+                            }
                             self.mode = Mode::Terminal;
                         }
                         return None;
@@ -2346,6 +2357,68 @@ impl AppState {
         })
     }
 
+    fn collapsed_workspace_at_row(&self, row: u16) -> Option<usize> {
+        if !self.sidebar_collapsed {
+            return None;
+        }
+
+        let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        if ws_area == Rect::default() || row < ws_area.y || row >= ws_area.y + ws_area.height {
+            return None;
+        }
+
+        let idx = (row - ws_area.y) as usize;
+        (idx < self.workspaces.len()).then_some(idx)
+    }
+
+    fn collapsed_detail_workspace_idx(&self) -> Option<usize> {
+        if matches!(
+            self.mode,
+            Mode::Navigate
+                | Mode::RenameWorkspace
+                | Mode::Resize
+                | Mode::ConfirmClose
+                | Mode::ContextMenu
+                | Mode::Settings
+                | Mode::GlobalMenu
+                | Mode::KeybindHelp
+        ) {
+            Some(self.selected)
+        } else {
+            self.active
+        }
+    }
+
+    fn collapsed_agent_detail_target_at(
+        &self,
+        row: u16,
+    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        if !self.sidebar_collapsed {
+            return None;
+        }
+
+        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        let detail_content_area = Rect::new(
+            detail_area.x,
+            detail_area.y,
+            detail_area.width,
+            detail_area.height.saturating_sub(1),
+        );
+        if detail_content_area == Rect::default()
+            || row < detail_content_area.y
+            || row >= detail_content_area.y + detail_content_area.height
+        {
+            return None;
+        }
+
+        let ws_idx = self.collapsed_detail_workspace_idx()?;
+        let ws = self.workspaces.get(ws_idx)?;
+        let detail_idx = (row - detail_content_area.y) as usize;
+        let details = ws.pane_details();
+        let detail = details.get(detail_idx)?;
+        Some((ws_idx, detail.tab_idx, detail.pane_id))
+    }
+
     fn workspace_drop_index_at_row(&self, row: u16) -> Option<usize> {
         let area = self.workspace_list_rect();
         let footer = self.sidebar_footer_rect();
@@ -2415,22 +2488,7 @@ impl AppState {
             return None;
         }
 
-        let detail_ws_idx = if matches!(
-            self.mode,
-            Mode::Navigate
-                | Mode::RenameWorkspace
-                | Mode::Resize
-                | Mode::ConfirmClose
-                | Mode::ContextMenu
-                | Mode::Settings
-                | Mode::GlobalMenu
-                | Mode::KeybindHelp
-        ) {
-            self.selected
-        } else {
-            self.active?
-        };
-
+        let detail_ws_idx = self.collapsed_detail_workspace_idx()?;
         let ws = self.workspaces.get(detail_ws_idx)?;
         let relative_row = row - (detail_area.y + 3);
         let entry_height = 3;
@@ -3445,6 +3503,47 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 16));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[1].layout.focused(),
+            second_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_collapsed_agent_row_switches_to_correct_tab_and_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&first_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        let second_tab = ws.test_add_tab(Some("logs"));
+        let second_pane = ws.tabs[second_tab].root_pane;
+        ws.tabs[second_tab]
+            .panes
+            .get_mut(&second_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail_area.x,
+            detail_area.y + 1,
+        ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
         assert_eq!(
