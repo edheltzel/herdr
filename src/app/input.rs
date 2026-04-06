@@ -862,10 +862,7 @@ fn execute_navigate_action(state: &mut AppState, action: NavigateAction) {
             state.next_workspace();
             leave_navigate_mode(state);
         }
-        NavigateAction::NewTab => {
-            state.request_new_tab = true;
-            leave_navigate_mode(state);
-        }
+        NavigateAction::NewTab => open_new_tab_dialog(state),
         NavigateAction::RenameTab => open_rename_active_tab(state, false),
         NavigateAction::PreviousTab => {
             state.previous_tab();
@@ -921,6 +918,8 @@ fn open_rename_workspace(state: &mut AppState, ws_idx: usize) {
 }
 
 fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
@@ -928,6 +927,19 @@ fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
             state.mode = Mode::RenameTab;
         }
     }
+}
+
+fn open_new_tab_dialog(state: &mut AppState) {
+    let next_tab_name = state
+        .active
+        .and_then(|i| state.workspaces.get(i))
+        .map(|ws| (ws.tabs.len() + 1).to_string())
+        .unwrap_or_else(|| "1".to_string());
+    state.creating_new_tab = true;
+    state.requested_new_tab_name = None;
+    state.name_input = next_tab_name;
+    state.name_input_replace_on_type = true;
+    state.mode = Mode::RenameTab;
 }
 
 /// Return to the appropriate mode after completing a modal action.
@@ -1017,21 +1029,32 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             } else {
                 state.name_input.trim().to_string()
             };
-            if !new_name.is_empty() {
-                match state.mode {
-                    Mode::RenameWorkspace if !state.workspaces.is_empty() => {
+            match state.mode {
+                Mode::RenameWorkspace if !state.workspaces.is_empty() => {
+                    if !new_name.is_empty() {
                         state.workspaces[state.selected].set_custom_name(new_name);
                     }
-                    Mode::RenameTab => {
+                }
+                Mode::RenameTab if state.creating_new_tab => {
+                    state.request_new_tab = true;
+                    state.requested_new_tab_name = if new_name.is_empty() {
+                        None
+                    } else {
+                        Some(new_name)
+                    };
+                }
+                Mode::RenameTab => {
+                    if !new_name.is_empty() {
                         if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
                             if let Some(tab) = ws.active_tab_mut() {
                                 tab.set_custom_name(new_name);
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
+            state.creating_new_tab = false;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -1041,6 +1064,8 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.name_input_replace_on_type = false;
         }
         ModalAction::Cancel => {
+            state.creating_new_tab = false;
+            state.requested_new_tab_name = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -1145,8 +1170,7 @@ fn apply_context_menu_action(state: &mut AppState, menu: ContextMenuState, idx: 
             state.selected = ws_idx;
             state.active = Some(ws_idx);
             state.switch_tab(tab_idx);
-            state.request_new_tab = true;
-            state.mode = Mode::Terminal;
+            open_new_tab_dialog(state);
         }
         (ContextMenuKind::Tab { ws_idx, tab_idx }, Some("Rename")) => {
             state.selected = ws_idx;
@@ -1941,8 +1965,7 @@ impl AppState {
                     return None;
                 }
                 if self.on_new_tab_button(mouse.column, mouse.row) {
-                    self.request_new_tab = true;
-                    self.mode = Mode::Terminal;
+                    open_new_tab_dialog(self);
                     return None;
                 }
 
@@ -3066,6 +3089,55 @@ mod tests {
         assert_eq!(state.mode, Mode::RenameTab);
         assert_eq!(state.name_input, "2");
         assert!(state.name_input_replace_on_type);
+    }
+
+    #[test]
+    fn new_tab_action_opens_dialog_without_creating_tab() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        execute_navigate_action(&mut state, NavigateAction::NewTab);
+
+        assert_eq!(state.mode, Mode::RenameTab);
+        assert!(state.creating_new_tab);
+        assert_eq!(state.name_input, "2");
+        assert!(state.name_input_replace_on_type);
+        assert!(!state.request_new_tab);
+        assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn cancel_new_tab_dialog_leaves_workspace_unchanged() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(!state.request_new_tab);
+        assert!(state.requested_new_tab_name.is_none());
+        assert_eq!(state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn saving_new_tab_dialog_requests_creation_with_name() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+        state.name_input = "logs".into();
+        state.name_input_replace_on_type = false;
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(state.request_new_tab);
+        assert_eq!(state.requested_new_tab_name.as_deref(), Some("logs"));
     }
 
     #[test]

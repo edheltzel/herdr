@@ -201,6 +201,8 @@ impl App {
             should_quit: false,
             request_new_workspace: false,
             request_new_tab: false,
+            creating_new_tab: false,
+            requested_new_tab_name: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1906,6 +1908,7 @@ impl App {
     }
 
     fn create_tab(&mut self) {
+        let custom_name = self.state.requested_new_tab_name.take();
         let initial_cwd = self
             .state
             .active
@@ -1913,16 +1916,16 @@ impl App {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("/"));
         match self.create_tab_with_options(initial_cwd, true) {
-            Ok(_) => {
-                if let Some(ws) = self
-                    .state
-                    .active
-                    .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
-                {
-                    if let Some(name) = ws.active_tab_display_name() {
-                        self.state.name_input = name;
-                        self.state.name_input_replace_on_type = true;
-                        self.state.mode = Mode::RenameTab;
+            Ok(tab_idx) => {
+                if let Some(name) = custom_name {
+                    if let Some(ws) = self
+                        .state
+                        .active
+                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    {
+                        if let Some(tab) = ws.tabs.get_mut(tab_idx) {
+                            tab.set_custom_name(name);
+                        }
                     }
                 }
             }
