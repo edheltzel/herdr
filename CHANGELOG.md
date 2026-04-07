@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.3] - 2026-04-07
+
 ### Fixed
 - Update checks and in-app **What's New** release notes no longer depend on GitHub’s release API, which avoids the transient 403 failures from the previous update path.
 - `herdr pane run ...` now submits the full command atomically in one request, fixing cases where scripted commands did not reliably execute because the final Enter was sent separately.
