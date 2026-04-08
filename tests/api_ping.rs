@@ -177,7 +177,6 @@ fn wait_for_event(
 }
 
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn ping_over_socket_returns_version() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -201,7 +200,6 @@ fn ping_over_socket_returns_version() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn workspace_list_and_create_round_trip() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -385,7 +383,6 @@ fn workspace_list_and_create_round_trip() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn tab_methods_round_trip_over_socket() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -663,7 +660,6 @@ fn events_subscribe_streams_lifecycle_and_agent_events() {
 #[cfg(not(target_os = "macos"))]
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn pane_report_agent_updates_effective_state() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -765,7 +761,6 @@ fn pane_report_agent_updates_effective_state() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -914,7 +909,6 @@ fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn pane_clear_agent_authority_restores_fallback_state() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -1036,7 +1030,6 @@ fn pane_clear_agent_authority_restores_fallback_state() {
 }
 
 #[test]
-#[ignore = "flaky during ghostty backend epic #000; re-enable before cutover"]
 fn events_subscribe_streams_output_and_agent_state_events() {
     let _lock = test_lock();
     let base = unique_test_dir();
