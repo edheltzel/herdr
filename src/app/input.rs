@@ -940,15 +940,18 @@ fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
     }
 }
 
-fn open_new_tab_dialog(state: &mut AppState) {
-    let next_tab_name = state
+fn next_new_tab_default_name(state: &AppState) -> String {
+    state
         .active
         .and_then(|i| state.workspaces.get(i))
         .map(|ws| (ws.tabs.len() + 1).to_string())
-        .unwrap_or_else(|| "1".to_string());
+        .unwrap_or_else(|| "1".to_string())
+}
+
+fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
-    state.name_input = next_tab_name;
+    state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
 }
@@ -1049,16 +1052,20 @@ fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 }
                 Mode::RenameTab if state.creating_new_tab => {
                     state.request_new_tab = true;
-                    state.requested_new_tab_name = if new_name.is_empty() {
-                        None
-                    } else {
-                        Some(new_name)
-                    };
+                    let default_name = next_new_tab_default_name(state);
+                    state.requested_new_tab_name =
+                        if new_name.is_empty() || new_name == default_name {
+                            None
+                        } else {
+                            Some(new_name)
+                        };
                 }
                 Mode::RenameTab => {
-                    if !new_name.is_empty() {
-                        if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
-                            if let Some(tab) = ws.active_tab_mut() {
+                    if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
+                        if let Some(tab) = ws.active_tab_mut() {
+                            let keep_auto_name =
+                                tab.is_auto_named() && new_name == tab.number.to_string();
+                            if !new_name.is_empty() && !keep_auto_name {
                                 tab.set_custom_name(new_name);
                                 state.mark_session_dirty();
                             }
@@ -3424,6 +3431,62 @@ mod tests {
         assert!(!state.creating_new_tab);
         assert!(state.request_new_tab);
         assert_eq!(state.requested_new_tab_name.as_deref(), Some("logs"));
+    }
+
+    #[test]
+    fn saving_new_tab_dialog_with_default_name_keeps_tab_auto_named() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(!state.creating_new_tab);
+        assert!(state.request_new_tab);
+        assert!(state.requested_new_tab_name.is_none());
+    }
+
+    #[test]
+    fn closing_first_auto_tab_resets_remaining_auto_tab_and_next_prompt() {
+        let mut state = state_with_workspaces(&["test"]);
+        open_new_tab_dialog(&mut state);
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        state.workspaces[0].test_add_tab(state.requested_new_tab_name.as_deref());
+        state.request_new_tab = false;
+        state.requested_new_tab_name = None;
+
+        state.workspaces[0].close_tab(0);
+        state.workspaces[0].switch_tab(0);
+
+        assert_eq!(state.workspaces[0].tabs[0].display_name(), "1");
+        assert!(state.workspaces[0].tabs[0].custom_name.is_none());
+
+        open_new_tab_dialog(&mut state);
+        assert_eq!(state.name_input, "2");
+    }
+
+    #[test]
+    fn renaming_auto_tab_to_its_default_number_keeps_it_auto_named() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.workspaces[0].test_add_tab(None);
+        state.workspaces[0].switch_tab(1);
+
+        open_rename_active_tab(&mut state, false);
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::Terminal);
+        assert!(state.workspaces[0].tabs[1].custom_name.is_none());
+        assert_eq!(state.workspaces[0].tabs[1].display_name(), "2");
     }
 
     #[test]

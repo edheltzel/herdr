@@ -558,10 +558,17 @@ fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         };
         let active = idx == ws.active_tab;
         let style = if active {
+            let base = Style::default().fg(p.panel_bg).bg(p.accent);
+            if tab.is_auto_named() {
+                base.add_modifier(Modifier::DIM)
+            } else {
+                base.add_modifier(Modifier::BOLD)
+            }
+        } else if tab.is_auto_named() {
             Style::default()
-                .fg(p.panel_bg)
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
+                .fg(p.overlay0)
+                .bg(p.surface0)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(p.overlay1).bg(p.surface0)
         };
@@ -3136,6 +3143,36 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position((focused.inner_rect.x + 4, focused.inner_rect.y));
+    }
+
+    #[test]
+    fn tab_bar_dims_auto_named_tabs_and_emphasizes_custom_tabs() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        let custom_tab = ws.test_add_tab(Some("logs"));
+        ws.switch_tab(custom_tab);
+
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let auto_rect = app.view.tab_hit_areas[0];
+        let custom_rect = app.view.tab_hit_areas[1];
+        let auto_style = buffer[(auto_rect.x + 1, auto_rect.y)].style();
+        let custom_style = buffer[(custom_rect.x + 1, custom_rect.y)].style();
+
+        assert_eq!(auto_style.fg, Some(app.palette.overlay0));
+        assert!(auto_style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(custom_style.fg, Some(app.palette.panel_bg));
+        assert!(custom_style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

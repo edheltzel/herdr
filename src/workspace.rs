@@ -105,6 +105,10 @@ impl Tab {
             .unwrap_or_else(|| self.number.to_string())
     }
 
+    pub fn is_auto_named(&self) -> bool {
+        self.custom_name.is_none()
+    }
+
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
     }
