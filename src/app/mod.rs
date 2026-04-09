@@ -1075,34 +1075,33 @@ impl App {
                             }
                         }
                         let workspace = self.workspace_info(index);
+                        let tab = self
+                            .tab_info(index, 0)
+                            .expect("new workspace should have an initial tab");
+                        let root_pane = self
+                            .root_pane_info(index, 0)
+                            .expect("new workspace should have an initial root pane");
                         self.emit_event(crate::api::schema::EventEnvelope {
                             event: crate::api::schema::EventKind::WorkspaceCreated,
                             data: crate::api::schema::EventData::WorkspaceCreated {
                                 workspace: workspace.clone(),
                             },
                         });
-                        if let Some(tab) = self.tab_info(index, 0) {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::TabCreated,
-                                data: crate::api::schema::EventData::TabCreated { tab },
-                            });
-                        }
-                        if let Some(pane_id) = self.state.workspaces[index]
-                            .layout
-                            .pane_ids()
-                            .first()
-                            .copied()
-                        {
-                            if let Some(pane) = self.pane_info(index, pane_id) {
-                                self.emit_event(crate::api::schema::EventEnvelope {
-                                    event: crate::api::schema::EventKind::PaneCreated,
-                                    data: crate::api::schema::EventData::PaneCreated { pane },
-                                });
-                            }
-                        }
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::TabCreated,
+                            data: crate::api::schema::EventData::TabCreated { tab: tab.clone() },
+                        });
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneCreated,
+                            data: crate::api::schema::EventData::PaneCreated {
+                                pane: root_pane.clone(),
+                            },
+                        });
                         SuccessResponse {
                             id: request.id,
-                            result: ResponseResult::WorkspaceInfo { workspace },
+                            result: self
+                                .workspace_created_result(index)
+                                .expect("new workspace should produce a complete create response"),
                         }
                     }
                     Err(err) => {
@@ -1360,28 +1359,24 @@ impl App {
                         }
                         self.schedule_session_save();
                         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
-                        if let Some(pane_id) = self.state.workspaces[ws_idx].tabs[tab_idx]
-                            .layout
-                            .pane_ids()
-                            .first()
-                            .copied()
-                        {
-                            self.emit_event(crate::api::schema::EventEnvelope {
-                                event: crate::api::schema::EventKind::TabCreated,
-                                data: crate::api::schema::EventData::TabCreated {
-                                    tab: tab.clone(),
-                                },
-                            });
-                            if let Some(pane) = self.pane_info(ws_idx, pane_id) {
-                                self.emit_event(crate::api::schema::EventEnvelope {
-                                    event: crate::api::schema::EventKind::PaneCreated,
-                                    data: crate::api::schema::EventData::PaneCreated { pane },
-                                });
-                            }
-                        }
+                        let root_pane = self
+                            .root_pane_info(ws_idx, tab_idx)
+                            .expect("new tab should have a root pane");
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::TabCreated,
+                            data: crate::api::schema::EventData::TabCreated { tab: tab.clone() },
+                        });
+                        self.emit_event(crate::api::schema::EventEnvelope {
+                            event: crate::api::schema::EventKind::PaneCreated,
+                            data: crate::api::schema::EventData::PaneCreated {
+                                pane: root_pane.clone(),
+                            },
+                        });
                         SuccessResponse {
                             id: request.id,
-                            result: ResponseResult::TabInfo { tab },
+                            result: self
+                                .tab_created_result(ws_idx, tab_idx)
+                                .expect("new tab should produce a complete create response"),
                         }
                     }
                     Err(err) => {
@@ -2279,6 +2274,38 @@ impl App {
         })
     }
 
+    fn workspace_created_result(
+        &self,
+        ws_idx: usize,
+    ) -> Option<crate::api::schema::ResponseResult> {
+        Some(crate::api::schema::ResponseResult::WorkspaceCreated {
+            workspace: self.workspace_info(ws_idx),
+            tab: self.tab_info(ws_idx, 0)?,
+            root_pane: self.root_pane_info(ws_idx, 0)?,
+        })
+    }
+
+    fn tab_created_result(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<crate::api::schema::ResponseResult> {
+        Some(crate::api::schema::ResponseResult::TabCreated {
+            tab: self.tab_info(ws_idx, tab_idx)?,
+            root_pane: self.root_pane_info(ws_idx, tab_idx)?,
+        })
+    }
+
+    fn root_pane_info(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<crate::api::schema::PaneInfo> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tab = ws.tabs.get(tab_idx)?;
+        self.pane_info(ws_idx, tab.root_pane)
+    }
+
     fn pane_info(
         &self,
         ws_idx: usize,
@@ -2687,6 +2714,48 @@ mod tests {
 
         assert!(!api_request_changes_ui(&read_only));
         assert!(api_request_changes_ui(&mutating));
+    }
+
+    #[test]
+    fn workspace_create_response_includes_initial_tab_and_root_pane() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("api-root-pane")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let crate::api::schema::ResponseResult::WorkspaceCreated {
+            workspace,
+            tab,
+            root_pane,
+        } = app.workspace_created_result(0).unwrap()
+        else {
+            panic!("expected workspace_created response");
+        };
+
+        assert_eq!(workspace.label, "api-root-pane");
+        assert_eq!(tab.workspace_id, workspace.workspace_id);
+        assert_eq!(root_pane.workspace_id, workspace.workspace_id);
+        assert_eq!(root_pane.tab_id, tab.tab_id);
+    }
+
+    #[test]
+    fn tab_create_response_includes_root_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-tab-root-pane");
+        workspace.test_add_tab(None);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let crate::api::schema::ResponseResult::TabCreated { tab, root_pane } =
+            app.tab_created_result(0, 1).unwrap()
+        else {
+            panic!("expected tab_created response");
+        };
+
+        assert_eq!(tab.workspace_id, root_pane.workspace_id);
+        assert_eq!(root_pane.tab_id, tab.tab_id);
+        assert_eq!(tab.pane_count, 1);
     }
 
     #[test]

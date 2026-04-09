@@ -238,7 +238,7 @@ fn workspace_list_and_create_round_trip() {
         ),
     );
     assert_eq!(created["id"], "req_3");
-    assert_eq!(created["result"]["type"], "workspace_info");
+    assert_eq!(created["result"]["type"], "workspace_created");
     let workspace_id = created["result"]["workspace"]["workspace_id"]
         .as_str()
         .unwrap()
@@ -247,9 +247,15 @@ fn workspace_list_and_create_round_trip() {
         .as_str()
         .unwrap()
         .to_string();
+    let root_pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(created["result"]["workspace"]["number"], 1);
     assert_eq!(created["result"]["workspace"]["focused"], true);
     assert_eq!(created["result"]["workspace"]["tab_count"], 1);
+    assert_eq!(created["result"]["tab"]["tab_id"], active_tab_id);
+    assert_eq!(created["result"]["root_pane"]["tab_id"], active_tab_id);
     assert_eq!(active_tab_id, format!("{workspace_id}:1"));
 
     let listed = send_request(
@@ -278,6 +284,7 @@ fn workspace_list_and_create_round_trip() {
     assert_eq!(panes[0]["workspace_id"], workspace_id);
     assert_eq!(panes[0]["tab_id"], active_tab_id);
     let pane_id = panes[0]["pane_id"].as_str().unwrap().to_string();
+    assert_eq!(pane_id, root_pane_id);
 
     let pane = send_request(
         &socket_path,
@@ -429,13 +436,18 @@ fn tab_methods_round_trip_over_socket() {
             workspace_id
         ),
     );
-    assert_eq!(tab_created["result"]["type"], "tab_info");
+    assert_eq!(tab_created["result"]["type"], "tab_created");
     let second_tab_id = tab_created["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_root_pane_id = tab_created["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap()
         .to_string();
     assert_eq!(second_tab_id, format!("{workspace_id}:2"));
     assert_eq!(tab_created["result"]["tab"]["focused"], true);
+    assert_eq!(tab_created["result"]["root_pane"]["tab_id"], second_tab_id);
 
     let tab_list = send_request(
         &socket_path,
@@ -447,6 +459,18 @@ fn tab_methods_round_trip_over_socket() {
     let tabs = tab_list["result"]["tabs"].as_array().unwrap();
     assert_eq!(tabs.len(), 2);
     assert_eq!(tabs[0]["tab_id"], first_tab_id);
+
+    let panes = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_t3b","method":"pane.list","params":{{"workspace_id":"{}"}}}}"#,
+            workspace_id
+        ),
+    );
+    let panes = panes["result"]["panes"].as_array().unwrap();
+    assert!(panes
+        .iter()
+        .any(|pane| pane["pane_id"] == second_root_pane_id));
     assert_eq!(tabs[1]["tab_id"], second_tab_id);
 
     let tab_get = send_request(
@@ -485,6 +509,65 @@ fn tab_methods_round_trip_over_socket() {
         ),
     );
     assert_eq!(closed["result"]["type"], "ok");
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn tab_create_with_no_focus_preserves_active_tab() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_nf_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first_tab_id = created["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tab_created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_nf_2","method":"tab.create","params":{{"workspace_id":"{}","focus":false}}}}"#,
+            workspace_id
+        ),
+    );
+    assert_eq!(tab_created["result"]["type"], "tab_created");
+    let second_tab_id = tab_created["result"]["tab"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(second_tab_id, format!("{workspace_id}:2"));
+    assert_eq!(tab_created["result"]["tab"]["focused"], false);
+
+    let tab_list = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_nf_3","method":"tab.list","params":{{"workspace_id":"{}"}}}}"#,
+            workspace_id
+        ),
+    );
+    let tabs = tab_list["result"]["tabs"].as_array().unwrap();
+    assert_eq!(tabs[0]["tab_id"], first_tab_id);
+    assert_eq!(tabs[0]["focused"], true);
+    assert_eq!(tabs[1]["tab_id"], second_tab_id);
+    assert_eq!(tabs[1]["focused"], false);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -1314,7 +1397,7 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
             workspace_id
         ),
     );
-    assert_eq!(tab_created["result"]["type"], "tab_info");
+    assert_eq!(tab_created["result"]["type"], "tab_created");
 
     let mut reader = open_subscription(
         &socket_path,

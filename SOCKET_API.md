@@ -844,9 +844,11 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
 - `workspace create` without `--label` keeps the default cwd-based workspace naming
 - `workspace create --label` applies the custom workspace name immediately
+- `workspace create` returns `result.workspace`, `result.tab`, and `result.root_pane`
 - `tab create` focuses by default; pass `--no-focus` to keep focus where it is
 - `tab create` without `--label` keeps the default numbered tab naming
 - `tab create --label` applies the custom tab name immediately
+- `tab create` returns `result.tab` and `result.root_pane`
 - `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
 - `pane read` prints **text**, not json
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together

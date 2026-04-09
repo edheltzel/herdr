@@ -310,7 +310,7 @@ the heuristics are matched against each agent's real terminal output: prompt box
 
 herdr's workspace, tab, pane, and wait commands are documented in [`SOCKET_API.md`](./SOCKET_API.md) together with the socket methods they wrap.
 
-both `workspace create` and `tab create` support optional `--label` flags, so scripts and agents can name contexts immediately instead of renaming them after creation.
+both `workspace create` and `tab create` support optional `--label` flags, so scripts and agents can name contexts immediately instead of renaming them after creation. both create commands also return the created root pane in their json response, so clients can act on the new pane without an extra lookup.
 
 workspace ids are compact public ids like `1`, `2`, `3`.
 tab ids are compact public ids like `1:1`, `1:2`, `2:1`.

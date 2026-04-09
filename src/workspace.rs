@@ -379,8 +379,7 @@ impl Workspace {
         )?;
         self.register_new_pane(tab.root_pane);
         self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
-        Ok(self.active_tab)
+        Ok(self.tabs.len() - 1)
     }
 
     pub fn close_tab(&mut self, idx: usize) -> bool {

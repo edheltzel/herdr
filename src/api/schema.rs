@@ -405,11 +405,20 @@ pub enum ResponseResult {
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },
+    WorkspaceCreated {
+        workspace: WorkspaceInfo,
+        tab: TabInfo,
+        root_pane: PaneInfo,
+    },
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
     TabInfo {
         tab: TabInfo,
+    },
+    TabCreated {
+        tab: TabInfo,
+        root_pane: PaneInfo,
     },
     TabList {
         tabs: Vec<TabInfo>,
@@ -860,6 +869,40 @@ mod tests {
         };
 
         let json = serde_json::to_string(&response).unwrap();
+        let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, response);
+    }
+
+    #[test]
+    fn create_response_round_trips_with_root_pane() {
+        let response = SuccessResponse {
+            id: "req_2".into(),
+            result: ResponseResult::TabCreated {
+                tab: TabInfo {
+                    tab_id: "w_1:2".into(),
+                    workspace_id: "w_1".into(),
+                    number: 2,
+                    label: "review".into(),
+                    focused: false,
+                    pane_count: 1,
+                    agent_status: AgentStatus::Unknown,
+                },
+                root_pane: PaneInfo {
+                    pane_id: "w_1-3".into(),
+                    workspace_id: "w_1".into(),
+                    tab_id: "w_1:2".into(),
+                    focused: false,
+                    cwd: Some("/tmp/review".into()),
+                    agent: None,
+                    agent_status: AgentStatus::Unknown,
+                    revision: 0,
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"tab_created\""));
+        assert!(json.contains("\"root_pane\""));
         let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, response);
     }
