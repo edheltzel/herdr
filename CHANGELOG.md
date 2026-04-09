@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.6] - 2026-04-09
+
 ### Fixed
 - Agent state detection is now more reliable when panes are scrolled back, when Codex is running in narrow panes, and when Claude opens slash-command or settings menus, reducing false blocked or idle states.
 - Mouse-driven terminal text selection now autoscrolls into pane scrollback and clears cleanly after copy, so selecting beyond the visible viewport works as expected.
