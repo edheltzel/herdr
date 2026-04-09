@@ -238,6 +238,7 @@ impl App {
             should_quit: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_reload_keybinds: false,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
@@ -432,6 +433,12 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 self.create_tab();
+                needs_render = true;
+            }
+
+            if self.state.request_reload_keybinds {
+                self.state.request_reload_keybinds = false;
+                self.reload_keybinds();
                 needs_render = true;
             }
 
@@ -2034,6 +2041,34 @@ impl App {
         }
     }
 
+    fn reload_keybinds(&mut self) {
+        let previous_toast = self.state.toast.clone();
+        match crate::config::load_live_keybinds() {
+            Ok(live) => {
+                self.state.prefix_code = live.prefix.0;
+                self.state.prefix_mods = live.prefix.1;
+                self.state.keybinds = live.keybinds;
+                self.state.config_diagnostic = None;
+                self.config_diagnostic_deadline = None;
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::UpdateInstalled,
+                    title: "reloaded keybinds".to_string(),
+                    context: "using config.toml".to_string(),
+                });
+            }
+            Err(diagnostics) => {
+                let mut message = diagnostics.join("; ");
+                if !message.contains("keeping current keybinds") {
+                    message.push_str("; keeping current keybinds");
+                }
+                self.state.toast = None;
+                self.state.config_diagnostic = Some(message);
+                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+            }
+        }
+        self.sync_toast_deadline(previous_toast);
+    }
+
     fn save_theme(&mut self, name: &str) {
         self.update_config_file("theme", |content| {
             crate::config::upsert_section_value(content, "theme", "name", &format!("\"{name}\""))
@@ -2410,6 +2445,7 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    use std::sync::{Mutex, OnceLock};
 
     fn raw_key(
         code: KeyCode,
@@ -2440,6 +2476,86 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn config_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_config_path(name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "herdr-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique).join("config.toml")
+    }
+
+    #[test]
+    fn reload_keybinds_updates_live_state() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-keybinds-success");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.reload_keybinds();
+
+        assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
+        assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
+        assert_eq!(
+            app.state.keybinds.new_workspace,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
+        assert!(app.state.config_diagnostic.is_none());
+        let toast = app.state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
+        assert_eq!(toast.title, "reloaded keybinds");
+        assert_eq!(toast.context, "using config.toml");
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_keybinds_keeps_current_state_on_invalid_binding() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-keybinds-invalid");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[keys]\nnew_workspace = \"wat\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
+        let original_keybinds = app.state.keybinds.new_workspace;
+        app.reload_keybinds();
+
+        assert_eq!(
+            (app.state.prefix_code, app.state.prefix_mods),
+            original_prefix
+        );
+        assert_eq!(app.state.keybinds.new_workspace, original_keybinds);
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| {
+                message.contains("keys.new_workspace")
+                    && message.contains("keeping current keybinds")
+            }));
+        assert!(app.state.toast.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]

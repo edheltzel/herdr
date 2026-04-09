@@ -478,11 +478,16 @@ enum GlobalMenuAction {
     ApplyUpdate,
     WhatsNew,
     Keybinds,
+    ReloadKeybinds,
     Settings,
 }
 
 fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
-    let mut actions = vec![GlobalMenuAction::Settings, GlobalMenuAction::Keybinds];
+    let mut actions = vec![
+        GlobalMenuAction::Settings,
+        GlobalMenuAction::Keybinds,
+        GlobalMenuAction::ReloadKeybinds,
+    ];
     if state.latest_release_notes_available || state.update_available.is_some() {
         actions.push(GlobalMenuAction::WhatsNew);
     }
@@ -652,6 +657,10 @@ fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
         GlobalMenuAction::ApplyUpdate => state.should_quit = true,
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
+        GlobalMenuAction::ReloadKeybinds => {
+            state.request_reload_keybinds = true;
+            leave_modal(state);
+        }
         GlobalMenuAction::Settings => open_settings(state),
     }
 }
@@ -1594,7 +1603,7 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds"];
+        let mut labels = vec!["settings", "keybinds", "reload keybinds"];
         if self.latest_release_notes_available || self.update_available.is_some() {
             labels.push("what's new");
         }
@@ -3509,6 +3518,27 @@ mod tests {
     }
 
     #[test]
+    fn clicking_reload_keybinds_menu_item_requests_reload() {
+        let mut app = app_for_mouse_test();
+        let launcher = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            launcher.x,
+            launcher.y,
+        ));
+
+        let menu = app.state.global_menu_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 2,
+            menu.y + 3,
+        ));
+
+        assert!(app.state.request_reload_keybinds);
+        assert_eq!(app.state.mode, Mode::Navigate);
+    }
+
+    #[test]
     fn update_pending_menu_surfaces_apply_update_action() {
         let mut app = app_for_mouse_test();
         app.state.update_available = Some("0.3.2".into());
@@ -3523,14 +3553,20 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "what's new", "quit to apply update"]
+            vec![
+                "settings",
+                "keybinds",
+                "reload keybinds",
+                "what's new",
+                "quit to apply update"
+            ]
         );
 
         let menu = app.state.global_menu_rect();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 4,
+            menu.y + 5,
         ));
 
         assert!(app.state.should_quit);
@@ -3543,7 +3579,7 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "what's new"]
+            vec!["settings", "keybinds", "reload keybinds", "what's new"]
         );
     }
 

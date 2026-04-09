@@ -90,6 +90,12 @@ pub struct LoadedConfig {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct LiveKeybindConfig {
+    pub prefix: (KeyCode, KeyModifiers),
+    pub keybinds: Keybinds,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct KeysConfig {
@@ -424,6 +430,16 @@ impl Config {
             .chain(keybind_diags)
             .chain(self.ui.sound.diagnostics())
             .collect()
+    }
+
+    pub fn live_keybinds(&self) -> Result<LiveKeybindConfig, Vec<String>> {
+        let (prefix_diag, prefix, keybind_diags, keybinds) = self.validated_keybinds();
+        let diagnostics: Vec<String> = prefix_diag.into_iter().chain(keybind_diags).collect();
+        if diagnostics.is_empty() {
+            Ok(LiveKeybindConfig { prefix, keybinds })
+        } else {
+            Err(diagnostics)
+        }
     }
 }
 
@@ -817,6 +833,25 @@ pub fn config_path() -> PathBuf {
         return PathBuf::from(path);
     }
     config_dir().join("config.toml")
+}
+
+pub fn load_live_keybinds() -> Result<LiveKeybindConfig, Vec<String>> {
+    let path = config_path();
+    if !path.exists() {
+        return Config::default().live_keybinds();
+    }
+
+    let content = std::fs::read_to_string(&path).map_err(|err| {
+        vec![format!(
+            "config read error: {err}; keeping current keybinds"
+        )]
+    })?;
+    let config = toml::from_str::<Config>(&content).map_err(|err| {
+        vec![format!(
+            "config parse error: {err}; keeping current keybinds"
+        )]
+    })?;
+    config.live_keybinds()
 }
 
 fn upsert_top_level_bool(content: &str, key: &str, value: bool) -> String {
@@ -1283,6 +1318,42 @@ rename_workspace = "g"
             (KeyCode::Char('n'), KeyModifiers::SHIFT)
         );
         assert_eq!(kb.rename_workspace_label, "shift+n");
+    }
+
+    #[test]
+    fn live_keybinds_reject_invalid_keybinding() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+rename_workspace = "wat"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.live_keybinds().unwrap_err();
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.contains("keys.rename_workspace")));
+    }
+
+    #[test]
+    fn live_keybinds_ignore_non_key_diagnostics() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+new_workspace = "g"
+
+[ui.sound]
+done_path = "sounds/missing.mp3"
+"#,
+        )
+        .unwrap();
+
+        let live = config.live_keybinds().unwrap();
+        assert_eq!(
+            live.keybinds.new_workspace,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
     }
 
     #[test]
