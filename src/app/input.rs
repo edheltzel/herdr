@@ -2155,6 +2155,11 @@ impl AppState {
                         return None;
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                    self.focus_pane(info.id);
+                    if self.mode != Mode::Terminal {
+                        self.mode = Mode::Terminal;
+                    }
+
                     if self.forward_pane_mouse_button(&info, mouse) {
                         self.selection = None;
                         return None;
@@ -2170,11 +2175,6 @@ impl AppState {
                         col,
                         self.pane_scroll_metrics(info.id),
                     ));
-
-                    self.focus_pane(info.id);
-                    if self.mode != Mode::Terminal {
-                        self.mode = Mode::Terminal;
-                    }
                 } else if let Some(info) = self.view.pane_infos.iter().find(|p| {
                     mouse.column >= p.rect.x
                         && mouse.column < p.rect.x + p.rect.width
@@ -2336,10 +2336,7 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Up(MouseButton::Middle)
-            | MouseEventKind::Up(MouseButton::Right)
-            | MouseEventKind::Drag(MouseButton::Middle)
-            | MouseEventKind::Drag(MouseButton::Right)
+            MouseEventKind::Up(MouseButton::Middle) | MouseEventKind::Drag(MouseButton::Middle)
                 if !in_sidebar =>
             {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
@@ -2440,9 +2437,7 @@ impl AppState {
 
             MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    if self.forward_pane_mouse_button(&info, mouse) {
-                        return None;
-                    }
+                    self.focus_pane(info.id);
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane,
                         x: mouse.column,
@@ -4572,5 +4567,143 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    #[tokio::test]
+    async fn clicking_unfocused_pane_with_mouse_reporting_focuses_it_via_left_button() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(ratatui::layout::Direction::Vertical);
+
+        let terminal_area = Rect::new(26, 2, 80, 18);
+        let pane_infos = ws.tabs[0].layout.panes(terminal_area);
+        let first_info = pane_infos
+            .iter()
+            .find(|p| p.id == first_pane)
+            .expect("first pane info")
+            .clone();
+        let second_info = pane_infos
+            .iter()
+            .find(|p| p.id == second_pane)
+            .expect("second pane info")
+            .clone();
+
+        ws.tabs[0].runtimes.insert(
+            first_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                first_info.inner_rect.width.max(1),
+                first_info.inner_rect.height.max(1),
+                b"",
+            ),
+        );
+        ws.tabs[0].runtimes.insert(
+            second_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                second_info.inner_rect.width.max(1),
+                second_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+
+        ws.tabs[0].layout.focus_pane(first_pane);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            first_pane,
+            "first pane should be focused before click"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            second_info.inner_rect.x + 2,
+            second_info.inner_rect.y + 2,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            second_pane,
+            "left-clicking a pane with mouse reporting should move focus to it"
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn clicking_unfocused_pane_with_mouse_reporting_focuses_it_via_right_button() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let first_pane = ws.tabs[0].root_pane;
+        let second_pane = ws.test_split(ratatui::layout::Direction::Vertical);
+
+        let terminal_area = Rect::new(26, 2, 80, 18);
+        let pane_infos = ws.tabs[0].layout.panes(terminal_area);
+        let first_info = pane_infos
+            .iter()
+            .find(|p| p.id == first_pane)
+            .expect("first pane info")
+            .clone();
+        let second_info = pane_infos
+            .iter()
+            .find(|p| p.id == second_pane)
+            .expect("second pane info")
+            .clone();
+
+        ws.tabs[0].runtimes.insert(
+            first_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                first_info.inner_rect.width.max(1),
+                first_info.inner_rect.height.max(1),
+                b"",
+            ),
+        );
+        ws.tabs[0].runtimes.insert(
+            second_pane,
+            crate::pane::PaneRuntime::test_with_screen_bytes(
+                second_info.inner_rect.width.max(1),
+                second_info.inner_rect.height.max(1),
+                b"\x1b[?1002h",
+            ),
+        );
+
+        ws.tabs[0].layout.focus_pane(first_pane);
+
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            first_pane,
+            "first pane should be focused before click"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            second_info.inner_rect.x + 2,
+            second_info.inner_rect.y + 2,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            second_pane,
+            "right-clicking a pane with mouse reporting should move focus to it"
+        );
+        assert_eq!(
+            app.state.mode,
+            Mode::ContextMenu,
+            "right-click should enter ContextMenu mode"
+        );
+        assert!(
+            app.state.context_menu.is_some(),
+            "right-click should populate context_menu state"
+        );
     }
 }
