@@ -55,6 +55,15 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 }
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
+    spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+}
+
+fn spawn_herdr_with_path(
+    config_home: &Path,
+    runtime_dir: &Path,
+    socket_path: &Path,
+    path_override: Option<&Path>,
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -77,7 +86,11 @@ fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> Sp
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
+    cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
+    if let Some(path) = path_override {
+        cmd.env("PATH", path);
+    }
 
     let child = pair.slave.spawn_command(cmd).unwrap();
     SpawnedHerdr {
@@ -798,40 +811,14 @@ fn wait_agent_status_exits_when_idle_status_matches() {
         fs::set_permissions(&fake_pi, perms).unwrap();
     }
 
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
-    fs::create_dir_all(&runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    cmd.arg("--no-session");
-    cmd.env("XDG_CONFIG_HOME", &config_home);
-    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
-    cmd.env("HERDR_SOCKET_PATH", &socket_path);
-    cmd.env_remove("HERDR_ENV");
-    cmd.env(
-        "PATH",
-        format!(
-            "{}:{}",
-            bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
     );
-    let child = pair.slave.spawn_command(cmd).unwrap();
-    let herdr = SpawnedHerdr {
-        _master: pair.master,
-        child,
-    };
 
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
@@ -895,40 +882,14 @@ fn wait_agent_status_exits_when_done_status_matches() {
         fs::set_permissions(&fake_pi, perms).unwrap();
     }
 
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
-    fs::create_dir_all(&runtime_dir).unwrap();
-    fs::write(
-        config_home.join("herdr/config.toml"),
-        "onboarding = false\n",
-    )
-    .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    cmd.arg("--no-session");
-    cmd.env("XDG_CONFIG_HOME", &config_home);
-    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
-    cmd.env("HERDR_SOCKET_PATH", &socket_path);
-    cmd.env_remove("HERDR_ENV");
-    cmd.env(
-        "PATH",
-        format!(
-            "{}:{}",
-            bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
     );
-    let child = pair.slave.spawn_command(cmd).unwrap();
-    let herdr = SpawnedHerdr {
-        _master: pair.master,
-        child,
-    };
 
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
