@@ -784,6 +784,13 @@ impl App {
     }
 
     fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::ClipboardWrite { bytes } = ev {
+            use std::io::Write;
+            let _ = std::io::stdout().write_all(&bytes);
+            let _ = std::io::stdout().flush();
+            return;
+        }
+
         if let AppEvent::PaneDied { pane_id } = &ev {
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {

@@ -281,9 +281,10 @@ impl InputState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessBytesResult {
     request_render: bool,
+    clipboard_writes: Vec<Vec<u8>>,
 }
 
 struct GhosttyPaneTerminal {
@@ -297,6 +298,7 @@ struct GhosttyPaneCore {
     host_terminal_theme: crate::terminal_theme::TerminalTheme,
     transient_default_color_owner_pgid: Option<u32>,
     default_color_tracker: DefaultColorOscTracker,
+    osc52_forwarder: Osc52Forwarder,
 }
 
 #[derive(Debug, Default)]
@@ -374,6 +376,120 @@ fn is_default_color_set_osc(body: &[u8]) -> bool {
     let command = &body[..separator];
     let value = &body[separator + 1..];
     matches!(command, b"10" | b"11") && !value.is_empty() && value != b"?"
+}
+
+/// 256 KiB of base64 ≈ 192 KiB of text — enough for real source-file copies
+/// while still bounding memory against stream garbage.
+const OSC52_MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc52Terminator {
+    Bel,
+    St,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Osc52ForwarderState {
+    #[default]
+    Ground,
+    Escape,
+    OscBody,
+    OscEscape,
+}
+
+/// Reconstructs OSC 52 clipboard-write sequences from raw PTY bytes so the
+/// main loop can re-emit them. `libghostty-vt`'s readonly stream handler
+/// drops `.clipboard_contents` actions, so without this forwarder clipboard
+/// writes from child processes never reach the host terminal.
+#[derive(Debug, Default)]
+struct Osc52Forwarder {
+    state: Osc52ForwarderState,
+    body: Vec<u8>,
+    pending: Vec<Vec<u8>>,
+}
+
+impl Osc52Forwarder {
+    fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                Osc52ForwarderState::Ground => {
+                    if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    }
+                }
+                Osc52ForwarderState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = Osc52ForwarderState::OscBody;
+                    } else if byte == 0x1b {
+                        self.state = Osc52ForwarderState::Escape;
+                    } else {
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                }
+                Osc52ForwarderState::OscBody => match byte {
+                    0x07 => {
+                        self.finalize(Osc52Terminator::Bel);
+                        self.state = Osc52ForwarderState::Ground;
+                    }
+                    0x1b => self.state = Osc52ForwarderState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                Osc52ForwarderState::OscEscape => {
+                    if byte == b'\\' {
+                        self.finalize(Osc52Terminator::St);
+                        self.state = Osc52ForwarderState::Ground;
+                    } else {
+                        self.body.push(0x1b);
+                        self.body.push(byte);
+                        self.state = Osc52ForwarderState::OscBody;
+                    }
+                }
+            }
+
+            if self.body.len() > OSC52_MAX_PAYLOAD_BYTES {
+                self.body.clear();
+                self.state = Osc52ForwarderState::Ground;
+            }
+        }
+    }
+
+    fn finalize(&mut self, terminator: Osc52Terminator) {
+        if is_osc52_clipboard_write(&self.body) {
+            let mut sequence = Vec::with_capacity(self.body.len() + 4);
+            sequence.extend_from_slice(b"\x1b]");
+            sequence.extend_from_slice(&self.body);
+            match terminator {
+                Osc52Terminator::Bel => sequence.push(0x07),
+                Osc52Terminator::St => sequence.extend_from_slice(b"\x1b\\"),
+            }
+            self.pending.push(sequence);
+        }
+        self.body.clear();
+    }
+
+    fn drain_pending(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+/// Accepts `52;c;<base64>` and `52;;<base64>` (ghostty treats the empty
+/// selector as the standard clipboard). Queries (`?`) are rejected because
+/// herdr has no path to reply to the child with clipboard contents.
+fn is_osc52_clipboard_write(body: &[u8]) -> bool {
+    let Some(rest) = body.strip_prefix(b"52;") else {
+        return false;
+    };
+    let Some(sep) = rest.iter().position(|b| *b == b';') else {
+        return false;
+    };
+    let selector = &rest[..sep];
+    let data = &rest[sep + 1..];
+    let is_standard_clipboard = selector.is_empty() || selector == b"c";
+    if !is_standard_clipboard {
+        return false;
+    }
+    !data.is_empty() && data != b"?"
 }
 
 fn foreground_job_is_shell(job: &crate::platform::ForegroundJob, shell_pid: u32) -> bool {
@@ -612,6 +728,7 @@ impl GhosttyPaneTerminal {
                 host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
                 transient_default_color_owner_pgid: None,
                 default_color_tracker: DefaultColorOscTracker::default(),
+                osc52_forwarder: Osc52Forwarder::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
         })
@@ -663,6 +780,7 @@ impl GhosttyPaneTerminal {
             error!(pane = pane_id.raw(), "ghostty core lock poisoned in reader");
             return ProcessBytesResult {
                 request_render: false,
+                clipboard_writes: Vec::new(),
             };
         };
 
@@ -676,6 +794,9 @@ impl GhosttyPaneTerminal {
             }
         }
 
+        core.osc52_forwarder.observe(bytes);
+        let clipboard_writes = core.osc52_forwarder.drain_pending();
+
         core.terminal.write(bytes);
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
@@ -687,6 +808,7 @@ impl GhosttyPaneTerminal {
         let _ = response_writer;
         ProcessBytesResult {
             request_render: !synchronized_output,
+            clipboard_writes,
         }
     }
 
@@ -1693,6 +1815,7 @@ impl PaneRuntime {
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let child_pid = child_pid.clone();
+            let events = events.clone();
             tokio::task::spawn_blocking(move || {
                 let mut buf = [0u8; 8192];
                 loop {
@@ -1712,6 +1835,20 @@ impl PaneRuntime {
                             );
                             if result.request_render && !render_dirty.swap(true, Ordering::AcqRel) {
                                 render_notify.notify_one();
+                            }
+                            for bytes in result.clipboard_writes {
+                                // Non-blocking: stalling the PTY reader on a
+                                // saturated main loop would be worse than
+                                // dropping a clipboard write.
+                                if let Err(err) =
+                                    events.try_send(AppEvent::ClipboardWrite { bytes })
+                                {
+                                    warn!(
+                                        pane = pane_id.raw(),
+                                        err = %err,
+                                        "dropped OSC 52 clipboard write"
+                                    );
+                                }
                             }
                         }
                     }
@@ -2505,6 +2642,154 @@ mod tests {
 
         assert!(!tracker.observe(b"\x1b]10;?\x1b\\"));
         assert!(!tracker.observe(b"\x1b]11;?\x07"));
+    }
+
+    #[test]
+    fn osc52_forwarder_detects_write_with_bel() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGVsbG8=\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_detects_write_with_st() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGVsbG8=\x1b\\");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGVsbG8=\x1b\\");
+    }
+
+    #[test]
+    fn osc52_forwarder_detects_empty_selector_form() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;;aGVsbG8=\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;;aGVsbG8=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_ignores_query() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;?\x07");
+        assert!(fw.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn osc52_forwarder_ignores_empty_selector_query() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;;?\x07");
+        assert!(fw.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn osc52_forwarder_ignores_other_kinds() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;p;aGk=\x07");
+        fw.observe(b"\x1b]52;s;aGk=\x07");
+        fw.observe(b"\x1b]52;q;aGk=\x07");
+        fw.observe(b"\x1b]52;0;aGk=\x07");
+        fw.observe(b"\x1b]52;7;aGk=\x07");
+        assert!(fw.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn osc52_forwarder_ignores_non_osc52() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]11;?\x07");
+        fw.observe(b"\x1b]0;title\x07");
+        fw.observe(b"\x1b]8;;https://example.com\x1b\\");
+        assert!(fw.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn osc52_forwarder_handles_split_sequence_mid_payload() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGVs");
+        assert!(fw.drain_pending().is_empty());
+        fw.observe(b"bG8gd29y");
+        assert!(fw.drain_pending().is_empty());
+        fw.observe(b"bGQ=\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_handles_split_before_bel() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGk=");
+        assert!(fw.drain_pending().is_empty());
+        fw.observe(b"\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_handles_split_between_esc_and_backslash() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGk=\x1b");
+        assert!(fw.drain_pending().is_empty());
+        fw.observe(b"\\");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGk=\x1b\\");
+    }
+
+    #[test]
+    fn osc52_forwarder_payload_size_limit() {
+        let mut fw = Osc52Forwarder::default();
+        let mut huge = Vec::with_capacity(OSC52_MAX_PAYLOAD_BYTES + 32);
+        huge.extend_from_slice(b"\x1b]52;c;");
+        huge.extend(std::iter::repeat_n(b'A', OSC52_MAX_PAYLOAD_BYTES + 16));
+        huge.push(0x07);
+        fw.observe(&huge);
+        assert!(fw.drain_pending().is_empty());
+
+        fw.observe(b"\x1b]52;c;aGk=\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_recovers_after_garbage() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x01\x02random\x7fbytes\x1b]52;c;aGk=\x07tail");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_esc_in_body_not_st() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGVs\x1b[bG8=\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], b"\x1b]52;c;aGVs\x1b[bG8=\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_multiple_in_one_chunk() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGk=\x07\x1b]52;c;Ynll\x07");
+        let pending = fw.drain_pending();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0], b"\x1b]52;c;aGk=\x07");
+        assert_eq!(pending[1], b"\x1b]52;c;Ynll\x07");
+    }
+
+    #[test]
+    fn osc52_forwarder_drain_clears_pending() {
+        let mut fw = Osc52Forwarder::default();
+        fw.observe(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(fw.drain_pending().len(), 1);
+        assert!(fw.drain_pending().is_empty());
     }
 
     #[test]

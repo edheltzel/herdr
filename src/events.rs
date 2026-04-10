@@ -38,4 +38,7 @@ pub enum AppEvent {
     },
     /// A new version was downloaded and installed. Restart to use it.
     UpdateReady { version: String },
+    /// A pane child emitted an OSC 52 clipboard-write sequence that the
+    /// main loop should re-emit on herdr's stdout.
+    ClipboardWrite { bytes: Vec<u8> },
 }
