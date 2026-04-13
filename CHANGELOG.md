@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.9] - 2026-04-13
+
 ### Fixed
 - Droid's primary-screen redraws no longer erase pane scrollback inside herdr, while normal scrollback-clear behavior is preserved elsewhere.
 - `q` is now dedicated to quitting in navigate mode instead of also acting as a generic cancel key in modals and overlays, reducing accidental quits.
