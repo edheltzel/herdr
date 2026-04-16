@@ -1,9 +1,20 @@
 //! API request handling and response building for [`App`].
 
 use super::{
-    agent_name, detect_state_from_api, encode_api_keys, encode_api_text, pane_agent_status,
-    parse_agent_name, tab_attention_priority, App, Mode,
+    detect_state_from_api, encode_api_keys, encode_api_text, pane_agent_status,
+    tab_attention_priority, App, Mode,
 };
+
+fn normalize_reported_agent_label(agent: &str) -> Option<String> {
+    let trimmed = agent.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(agent) = crate::detect::parse_agent_label(trimmed) {
+        return Some(crate::detect::agent_label(agent).to_string());
+    }
+    Some(trimmed.to_string())
+}
 
 pub(super) fn api_request_changes_ui(request: &crate::api::schema::Request) -> bool {
     use crate::api::schema::Method;
@@ -775,12 +786,12 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(agent) = parse_agent_name(&params.agent) else {
+                let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
                             code: "invalid_agent".into(),
-                            message: format!("unsupported agent {}", params.agent),
+                            message: "agent label must not be empty".into(),
                         },
                     })
                     .unwrap();
@@ -788,7 +799,7 @@ impl App {
                 self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                     pane_id,
                     source: params.source,
-                    agent,
+                    agent_label,
                     state: detect_state_from_api(params.state),
                     message: params.message,
                 });
@@ -828,12 +839,12 @@ impl App {
                     })
                     .unwrap();
                 };
-                let Some(agent) = parse_agent_name(&params.agent) else {
+                let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
                     return serde_json::to_string(&ErrorResponse {
                         id: request.id,
                         error: ErrorBody {
                             code: "invalid_agent".into(),
-                            message: format!("unsupported agent {}", params.agent),
+                            message: "agent label must not be empty".into(),
                         },
                     })
                     .unwrap();
@@ -841,7 +852,8 @@ impl App {
                 self.handle_internal_event(crate::events::AppEvent::HookAgentReleased {
                     pane_id,
                     source: params.source,
-                    agent,
+                    known_agent: crate::detect::parse_agent_label(&agent_label),
+                    agent_label,
                 });
                 SuccessResponse {
                     id: request.id,
@@ -1185,7 +1197,7 @@ impl App {
             cwd: runtime
                 .and_then(|rt| rt.cwd())
                 .map(|cwd| cwd.display().to_string()),
-            agent: pane.detected_agent.map(agent_name),
+            agent: pane.effective_agent_label().map(str::to_string),
             agent_status: pane_agent_status(pane.state, pane.seen),
             revision: 0,
         })

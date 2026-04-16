@@ -289,20 +289,17 @@ impl Tab {
             .pane_ids()
             .iter()
             .filter_map(|id| {
-                let pane = self.panes.get(id);
-                let agent = pane.and_then(|p| p.detected_agent)?;
-                let state = pane.map(|p| p.state).unwrap_or(AgentState::Unknown);
-                let seen = pane.map(|p| p.seen).unwrap_or(true);
-                let agent_label = agent_name(agent).to_string();
+                let pane = self.panes.get(id)?;
+                let agent_label = pane.effective_agent_label()?.to_string();
                 Some(PaneDetail {
                     pane_id: *id,
                     tab_idx: self.number.saturating_sub(1),
                     tab_label: self.display_name(),
                     label: agent_label.clone(),
                     agent_label,
-                    agent: Some(agent),
-                    state,
-                    seen,
+                    agent: pane.effective_known_agent(),
+                    state: pane.state,
+                    seen: pane.seen,
                 })
             })
             .collect()
@@ -740,22 +737,6 @@ fn pane_attention_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
-fn agent_name(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Pi => "pi",
-        Agent::Claude => "claude",
-        Agent::Codex => "codex",
-        Agent::Gemini => "gemini",
-        Agent::Cursor => "cursor",
-        Agent::Cline => "cline",
-        Agent::OpenCode => "opencode",
-        Agent::GithubCopilot => "copilot",
-        Agent::Kimi => "kimi",
-        Agent::Droid => "droid",
-        Agent::Amp => "amp",
-    }
-}
-
 pub fn derive_label_from_cwd(cwd: &Path) -> String {
     if let Some(repo_root) = git_repo_root(cwd) {
         if let Some(name) = repo_root.file_name().and_then(|n| n.to_str()) {
@@ -1090,5 +1071,26 @@ mod tests {
         assert_eq!(details.len(), 2);
         assert!(details.iter().any(|detail| detail.label == "main·pi"));
         assert!(details.iter().any(|detail| detail.label == "logs·claude"));
+    }
+
+    #[test]
+    fn pane_details_include_hook_reported_unknown_agents() {
+        let mut ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&root_pane)
+            .unwrap()
+            .set_hook_authority(
+                "custom:hermes".into(),
+                "hermes".into(),
+                AgentState::Working,
+                None,
+            );
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].agent_label, "hermes");
+        assert_eq!(details[0].agent, None);
     }
 }

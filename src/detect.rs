@@ -32,6 +32,40 @@ pub enum Agent {
     Amp,
 }
 
+pub fn agent_label(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Pi => "pi",
+        Agent::Claude => "claude",
+        Agent::Codex => "codex",
+        Agent::Gemini => "gemini",
+        Agent::Cursor => "cursor",
+        Agent::Cline => "cline",
+        Agent::OpenCode => "opencode",
+        Agent::GithubCopilot => "copilot",
+        Agent::Kimi => "kimi",
+        Agent::Droid => "droid",
+        Agent::Amp => "amp",
+    }
+}
+
+pub fn parse_agent_label(agent: &str) -> Option<Agent> {
+    let name = agent.trim().to_lowercase();
+    match name.as_str() {
+        "pi" => Some(Agent::Pi),
+        "claude" | "claude-code" => Some(Agent::Claude),
+        "codex" => Some(Agent::Codex),
+        "gemini" => Some(Agent::Gemini),
+        "cursor" => Some(Agent::Cursor),
+        "cline" => Some(Agent::Cline),
+        "opencode" | "open-code" => Some(Agent::OpenCode),
+        "copilot" | "github-copilot" | "ghcs" => Some(Agent::GithubCopilot),
+        "kimi" => Some(Agent::Kimi),
+        "droid" => Some(Agent::Droid),
+        "amp" | "amp-local" => Some(Agent::Amp),
+        _ => None,
+    }
+}
+
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
@@ -621,6 +655,25 @@ mod tests {
         assert_eq!(identify_agent("opencode"), Some(Agent::OpenCode));
         assert_eq!(identify_agent("kimi"), Some(Agent::Kimi));
         assert_eq!(identify_agent("ghcs"), Some(Agent::GithubCopilot));
+    }
+
+    #[test]
+    fn parse_known_agent_labels() {
+        assert_eq!(parse_agent_label("pi"), Some(Agent::Pi));
+        assert_eq!(parse_agent_label("claude"), Some(Agent::Claude));
+        assert_eq!(parse_agent_label("copilot"), Some(Agent::GithubCopilot));
+        assert_eq!(
+            parse_agent_label("github-copilot"),
+            Some(Agent::GithubCopilot)
+        );
+        assert_eq!(parse_agent_label("amp-local"), Some(Agent::Amp));
+    }
+
+    #[test]
+    fn agent_labels_use_display_names() {
+        assert_eq!(agent_label(Agent::Pi), "pi");
+        assert_eq!(agent_label(Agent::GithubCopilot), "copilot");
+        assert_eq!(agent_label(Agent::OpenCode), "opencode");
     }
 
     #[test]

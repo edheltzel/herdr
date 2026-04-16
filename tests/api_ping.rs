@@ -957,6 +957,51 @@ fn pane_report_agent_updates_effective_state() {
 
 #[cfg(not(target_os = "macos"))]
 #[test]
+fn pane_report_agent_accepts_unknown_agent_labels() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let created = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_generic_1","method":"workspace.create","params":{{"cwd":"{}","focus":true}}}}"#,
+            base.display()
+        ),
+    );
+    let pane_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .map(|workspace_id| format!("{}-1", workspace_id))
+        .unwrap();
+
+    let hook = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_generic_2","method":"pane.report_agent","params":{{"pane_id":"{}","source":"custom:hermes","agent":"hermes","state":"working"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(hook["result"]["type"], "ok");
+
+    let pane = send_request(
+        &socket_path,
+        &format!(
+            r#"{{"id":"req_hook_generic_3","method":"pane.get","params":{{"pane_id":"{}"}}}}"#,
+            pane_id
+        ),
+    );
+    assert_eq!(pane["result"]["pane"]["agent"], "hermes");
+    assert_eq!(pane["result"]["pane"]["agent_status"], "working");
+
+    cleanup_spawned_herdr(child, base);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
 fn pane_release_agent_suppresses_reacquire_during_graceful_exit() {
     let _lock = test_lock();
     let base = unique_test_dir();

@@ -53,20 +53,8 @@ fn notification_toast_for_state_change(
     }
 }
 
-fn agent_label(agent: Agent) -> &'static str {
-    match agent {
-        crate::detect::Agent::Pi => "pi",
-        crate::detect::Agent::Claude => "claude",
-        crate::detect::Agent::Codex => "codex",
-        crate::detect::Agent::Gemini => "gemini",
-        crate::detect::Agent::Cursor => "cursor",
-        crate::detect::Agent::Cline => "cline",
-        crate::detect::Agent::OpenCode => "opencode",
-        crate::detect::Agent::GithubCopilot => "copilot",
-        crate::detect::Agent::Kimi => "kimi",
-        crate::detect::Agent::Droid => "droid",
-        crate::detect::Agent::Amp => "amp",
-    }
+fn toast_agent_label(agent_label: &str) -> &str {
+    agent_label
 }
 
 fn notification_context(
@@ -84,13 +72,15 @@ fn notification_context(
     context
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneStateUpdate {
     pub pane_id: PaneId,
     pub ws_idx: usize,
-    pub previous_agent: Option<Agent>,
+    pub previous_agent_label: Option<String>,
+    pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
-    pub agent: Option<Agent>,
+    pub agent_label: Option<String>,
+    pub known_agent: Option<Agent>,
     pub state: AgentState,
 }
 
@@ -497,12 +487,12 @@ impl AppState {
             AppEvent::HookStateReported {
                 pane_id,
                 source,
-                agent,
+                agent_label,
                 state,
                 message,
             } => self
                 .update_pane_state(pane_id, |pane| {
-                    pane.set_hook_authority(source, agent, state, message)
+                    pane.set_hook_authority(source, agent_label, state, message)
                 })
                 .into_iter()
                 .collect(),
@@ -513,9 +503,10 @@ impl AppState {
             AppEvent::HookAgentReleased {
                 pane_id,
                 source,
-                agent,
+                agent_label,
+                ..
             } => self
-                .update_pane_state(pane_id, |pane| pane.release_agent(&source, agent))
+                .update_pane_state(pane_id, |pane| pane.release_agent(&source, &agent_label))
                 .into_iter()
                 .collect(),
             // Intercepted in App::handle_internal_event before reaching this
@@ -539,22 +530,25 @@ impl AppState {
                 .find_map(|tab| tab.panes.get_mut(&pane_id))?;
             update(pane)?
         };
-        self.apply_pane_state_change(ws_idx, pane_id, change);
-        Some(PaneStateUpdate {
+        let update = PaneStateUpdate {
             pane_id,
             ws_idx,
-            previous_agent: change.previous_agent,
+            previous_agent_label: change.previous_agent_label.clone(),
+            previous_known_agent: change.previous_known_agent,
             previous_state: change.previous_state,
-            agent: change.agent,
+            agent_label: change.agent_label.clone(),
+            known_agent: change.known_agent,
             state: change.state,
-        })
+        };
+        self.apply_pane_state_change(ws_idx, pane_id, &change);
+        Some(update)
     }
 
     fn apply_pane_state_change(
         &mut self,
         ws_idx: usize,
         pane_id: PaneId,
-        change: EffectiveStateChange,
+        change: &EffectiveStateChange,
     ) {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let Some(pane) = self.workspaces[ws_idx]
@@ -571,7 +565,7 @@ impl AppState {
             pane.seen = false;
         }
 
-        if self.sound.allows(change.agent) {
+        if self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
                 is_active_tab,
                 change.previous_state,
@@ -582,8 +576,8 @@ impl AppState {
         }
 
         if self.toast_config.enabled {
-            if let (Some(agent), Some(kind)) = (
-                change.agent,
+            if let (Some(agent_label), Some(kind)) = (
+                change.agent_label.as_deref(),
                 notification_toast_for_state_change(
                     is_active_tab,
                     change.previous_state,
@@ -598,7 +592,7 @@ impl AppState {
                 let context = notification_context(&self.workspaces[ws_idx], ws_idx, pane_id);
                 self.toast = Some(ToastNotification {
                     kind,
-                    title: format!("{} {}", agent_label(agent), event_text),
+                    title: format!("{} {}", toast_agent_label(agent_label), event_text),
                     context,
                 });
             }
@@ -923,6 +917,27 @@ mod tests {
         let toast = state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
         assert_eq!(toast.title, "pi needs attention");
+        assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn hook_reported_unknown_agent_sets_toast_title_from_label() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.enabled = true;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::HookStateReported {
+            pane_id: bg_pane_id,
+            source: "custom:hermes".into(),
+            agent_label: "hermes".into(),
+            state: AgentState::Blocked,
+            message: None,
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "hermes needs attention");
         assert_eq!(toast.context, "background · 2");
     }
 

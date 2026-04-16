@@ -154,6 +154,8 @@ heuristics also exist for these agents but have not been fully tested yet:
 
 for any other cli agent, herdr still works as a terminal-native multiplexer. you still get workspaces, panes, tiling, and notifications even when richer state detection is not available yet.
 
+for agents outside the built-in list, herdr also supports custom hook or plugin integrations over the local socket api. a custom integration can report any non-empty agent label, and that label will appear in pane info, events, and the sidebar without needing first-party built-in detection. see [`SOCKET_API.md`](./SOCKET_API.md) for the raw api surface.
+
 ## optional direct integrations
 
 automatic detection works out of the box. if an agent exposes hooks or plugins, the better path is to let it report state to herdr over the local socket api.

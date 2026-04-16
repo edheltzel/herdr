@@ -21,7 +21,7 @@ pub enum AppEvent {
     HookStateReported {
         pane_id: PaneId,
         source: String,
-        agent: Agent,
+        agent_label: String,
         state: AgentState,
         message: Option<String>,
     },
@@ -34,7 +34,8 @@ pub enum AppEvent {
     HookAgentReleased {
         pane_id: PaneId,
         source: String,
-        agent: Agent,
+        agent_label: String,
+        known_agent: Option<Agent>,
     },
     /// A new version was downloaded and installed. Restart to use it.
     UpdateReady { version: String },

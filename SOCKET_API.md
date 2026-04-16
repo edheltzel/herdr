@@ -141,6 +141,13 @@ for backward compatibility, requests also accept the older positional forms like
   "revision": 0
 }
 ```
+
+`agent` is an optional display label string.
+
+- when herdr detects a built-in agent, this is that built-in name like `pi` or `claude`
+- when a hook or plugin reports a custom agent through `pane.report_agent`, this can be any non-empty label like `hermes`
+- when no agent identity is known, it is omitted
+
 `pane_read` responses contain objects like:
 
 ```json
@@ -189,6 +196,9 @@ for backward compatibility, requests also accept the older positional forms like
 | `pane.send_text` | send literal text without Enter | `ok` |
 | `pane.send_keys` | send keypresses like `Enter` | `ok` |
 | `pane.send_input` | send literal text plus keypresses in order | `ok` |
+| `pane.report_agent` | report hook-authoritative agent label and state for a pane | `ok` |
+| `pane.clear_agent_authority` | clear hook-authoritative agent state for a pane | `ok` |
+| `pane.release_agent` | release a pane from the reported agent back to shell state | `ok` |
 | `pane.close` | close a pane | `ok` |
 | `pane.wait_for_output` | one-shot blocking wait for text | `output_matched` |
 | `events.subscribe` | start a long-lived subscription stream | `subscription_started` ack |
@@ -552,6 +562,75 @@ this sends text plus encoded keypresses in order within one request. when bracke
 
 `text` and `keys` are both optional, but at least one should usually be present.
 
+### `pane.report_agent`
+
+use this when an agent hook or plugin wants to report a semantic state directly over the socket api.
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "custom:hermes",
+  "agent": "hermes",
+  "state": "working",
+  "message": "running tools"
+}
+```
+
+notes:
+
+- `source` is required and identifies the reporting integration instance
+- `agent` is required and may be any non-empty label string
+- built-in names like `pi` are normalized to their public label form
+- custom labels like `hermes` are accepted as-is
+- while this authority is active, the reported `agent` and `state` override heuristic display for that pane
+- process detection still owns pane liveness and fallback when hook authority is cleared or released
+- `message` is optional metadata for the reporting integration
+
+returns `ok`.
+
+### `pane.clear_agent_authority`
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "custom:hermes"
+}
+```
+
+notes:
+
+- `source` is optional
+- when `source` is omitted, any hook authority for that pane is cleared
+- when `source` is present, only that reporting source is cleared
+
+returns `ok`.
+
+### `pane.release_agent`
+
+use this when the reported agent is exiting cleanly and wants herdr to drop agent identity immediately instead of waiting for fallback detection.
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "custom:hermes",
+  "agent": "hermes"
+}
+```
+
+notes:
+
+- `agent` uses the same non-empty label rules as `pane.report_agent`
+- this clears the pane's effective agent identity immediately when the source and label match the active authority
+- for built-in detected agents, herdr also applies its normal short reacquire suppression during graceful release
+
+returns `ok`.
+
 ### `pane.close`
 
 params:
@@ -791,6 +870,8 @@ example pushed `pane.agent_status_changed` event:
   }
 }
 ```
+
+`agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted.
 ## cli wrappers
 
 these commands talk to the same local socket surface and are usually the easiest starting point for shell scripts and coding agents.

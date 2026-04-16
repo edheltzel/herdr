@@ -795,8 +795,13 @@ impl App {
             }
         }
 
-        let released_agent = if let AppEvent::HookAgentReleased { pane_id, agent, .. } = &ev {
-            Some((*pane_id, *agent))
+        let released_agent = if let AppEvent::HookAgentReleased {
+            pane_id,
+            known_agent,
+            ..
+        } = &ev
+        {
+            known_agent.map(|agent| (*pane_id, agent))
         } else {
             None
         };
@@ -827,13 +832,13 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(update.ws_idx);
 
-        if update.previous_agent != update.agent {
+        if update.previous_agent_label != update.agent_label {
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentDetected,
                 data: crate::api::schema::EventData::PaneAgentDetected {
                     pane_id: pane_id.clone(),
                     workspace_id: workspace_id.clone(),
-                    agent: update.agent.map(agent_name),
+                    agent: update.agent_label.clone(),
                 },
             });
         }
@@ -1273,40 +1278,6 @@ fn pane_agent_status(
         (crate::detect::AgentState::Blocked, _) => crate::api::schema::AgentStatus::Blocked,
         (crate::detect::AgentState::Unknown, _) => crate::api::schema::AgentStatus::Unknown,
     }
-}
-
-fn parse_agent_name(agent: &str) -> Option<crate::detect::Agent> {
-    match agent {
-        "pi" => Some(crate::detect::Agent::Pi),
-        "claude" => Some(crate::detect::Agent::Claude),
-        "codex" => Some(crate::detect::Agent::Codex),
-        "gemini" => Some(crate::detect::Agent::Gemini),
-        "cursor" => Some(crate::detect::Agent::Cursor),
-        "cline" => Some(crate::detect::Agent::Cline),
-        "opencode" => Some(crate::detect::Agent::OpenCode),
-        "copilot" => Some(crate::detect::Agent::GithubCopilot),
-        "kimi" => Some(crate::detect::Agent::Kimi),
-        "droid" => Some(crate::detect::Agent::Droid),
-        "amp" => Some(crate::detect::Agent::Amp),
-        _ => None,
-    }
-}
-
-fn agent_name(agent: crate::detect::Agent) -> String {
-    match agent {
-        crate::detect::Agent::Pi => "pi",
-        crate::detect::Agent::Claude => "claude",
-        crate::detect::Agent::Codex => "codex",
-        crate::detect::Agent::Gemini => "gemini",
-        crate::detect::Agent::Cursor => "cursor",
-        crate::detect::Agent::Cline => "cline",
-        crate::detect::Agent::OpenCode => "opencode",
-        crate::detect::Agent::GithubCopilot => "copilot",
-        crate::detect::Agent::Kimi => "kimi",
-        crate::detect::Agent::Droid => "droid",
-        crate::detect::Agent::Amp => "amp",
-    }
-    .to_string()
 }
 
 #[cfg(test)]

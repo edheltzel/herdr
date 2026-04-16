@@ -105,16 +105,18 @@ fn stabilize_agent_state(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
     pub source: String,
-    pub agent: Agent,
+    pub agent_label: String,
     pub state: AgentState,
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveStateChange {
-    pub previous_agent: Option<Agent>,
+    pub previous_agent_label: Option<String>,
+    pub previous_known_agent: Option<Agent>,
     pub previous_state: AgentState,
-    pub agent: Option<Agent>,
+    pub agent_label: Option<String>,
+    pub known_agent: Option<Agent>,
     pub state: AgentState,
 }
 
@@ -146,40 +148,36 @@ impl PaneState {
         agent: Option<Agent>,
         fallback_state: AgentState,
     ) -> Option<EffectiveStateChange> {
-        let previous_agent = self.detected_agent;
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         self.detected_agent = agent;
         self.fallback_state = fallback_state;
-        if self
-            .hook_authority
-            .as_ref()
-            .is_some_and(|authority| Some(authority.agent) != self.detected_agent)
-        {
-            self.hook_authority = None;
-        }
-        self.recompute_effective_state(previous_agent, previous_state)
+        self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
     pub fn set_hook_authority(
         &mut self,
         source: String,
-        agent: Agent,
+        agent_label: String,
         state: AgentState,
         message: Option<String>,
     ) -> Option<EffectiveStateChange> {
-        let previous_agent = self.detected_agent;
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         self.hook_authority = Some(HookAuthority {
             source,
-            agent,
+            agent_label,
             state,
             message,
         });
-        self.recompute_effective_state(previous_agent, previous_state)
+        self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
     pub fn clear_hook_authority(&mut self, source: Option<&str>) -> Option<EffectiveStateChange> {
-        let previous_agent = self.detected_agent;
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let should_clear = self
             .hook_authority
@@ -189,51 +187,75 @@ impl PaneState {
             return None;
         }
         self.hook_authority = None;
-        self.recompute_effective_state(previous_agent, previous_state)
+        self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
     }
 
-    pub fn release_agent(&mut self, source: &str, agent: Agent) -> Option<EffectiveStateChange> {
-        if self.detected_agent != Some(agent) {
+    pub fn release_agent(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+    ) -> Option<EffectiveStateChange> {
+        let Some(current_agent_label) = self.effective_agent_label() else {
+            return None;
+        };
+        if current_agent_label != agent_label {
             return None;
         }
 
-        if self
-            .hook_authority
-            .as_ref()
-            .is_some_and(|authority| authority.agent != agent || authority.source != source)
-        {
+        if self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.agent_label != agent_label || authority.source != source
+        }) {
             return None;
         }
 
-        let previous_agent = self.detected_agent;
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.hook_authority = None;
-        self.recompute_effective_state(previous_agent, previous_state)
+        self.recompute_effective_state(previous_agent_label, previous_known_agent, previous_state)
+    }
+
+    pub fn effective_agent_label(&self) -> Option<&str> {
+        self.hook_authority
+            .as_ref()
+            .map(|authority| authority.agent_label.as_str())
+            .or_else(|| self.detected_agent.map(crate::detect::agent_label))
+    }
+
+    pub fn effective_known_agent(&self) -> Option<Agent> {
+        if let Some(authority) = &self.hook_authority {
+            return crate::detect::parse_agent_label(&authority.agent_label);
+        }
+        self.detected_agent
     }
 
     fn recompute_effective_state(
         &mut self,
-        previous_agent: Option<Agent>,
+        previous_agent_label: Option<String>,
+        previous_known_agent: Option<Agent>,
         previous_state: AgentState,
     ) -> Option<EffectiveStateChange> {
         let state = self
             .hook_authority
             .as_ref()
-            .filter(|authority| Some(authority.agent) == self.detected_agent)
             .map(|authority| authority.state)
             .unwrap_or(self.fallback_state);
+        let agent_label = self.effective_agent_label().map(str::to_string);
+        let known_agent = self.effective_known_agent();
 
-        if previous_agent == self.detected_agent && previous_state == state {
+        if previous_agent_label == agent_label && previous_state == state {
             return None;
         }
 
         self.state = state;
         Some(EffectiveStateChange {
-            previous_agent,
+            previous_agent_label,
+            previous_known_agent,
             previous_state,
-            agent: self.detected_agent,
+            agent_label,
+            known_agent,
             state,
         })
     }
@@ -3312,33 +3334,57 @@ mod tests {
     fn hook_authority_overrides_fallback_for_same_agent() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+        pane.set_hook_authority("herdr:pi".into(), "pi".into(), AgentState::Working, None);
 
         assert_eq!(pane.detected_agent, Some(Agent::Pi));
         assert_eq!(pane.fallback_state, AgentState::Idle);
+        assert_eq!(pane.effective_agent_label(), Some("pi"));
         assert_eq!(pane.state, AgentState::Working);
     }
 
     #[test]
-    fn hook_authority_clears_when_detected_agent_changes() {
+    fn hook_authority_can_override_with_unknown_agent_label() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+        pane.set_hook_authority(
+            "herdr:custom".into(),
+            "hermes".into(),
+            AgentState::Working,
+            None,
+        );
+
+        assert_eq!(pane.detected_agent, Some(Agent::Pi));
+        assert_eq!(pane.effective_agent_label(), Some("hermes"));
+        assert_eq!(pane.effective_known_agent(), None);
+        assert_eq!(pane.state, AgentState::Working);
+    }
+
+    #[test]
+    fn hook_authority_survives_detected_agent_changes() {
+        let mut pane = PaneState::new();
+        pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        pane.set_hook_authority(
+            "herdr:custom".into(),
+            "hermes".into(),
+            AgentState::Working,
+            None,
+        );
 
         pane.set_detected_state(None, AgentState::Unknown);
 
-        assert!(pane.hook_authority.is_none());
+        assert!(pane.hook_authority.is_some());
         assert_eq!(pane.detected_agent, None);
-        assert_eq!(pane.state, AgentState::Unknown);
+        assert_eq!(pane.effective_agent_label(), Some("hermes"));
+        assert_eq!(pane.state, AgentState::Working);
     }
 
     #[test]
     fn release_agent_clears_identity_immediately() {
         let mut pane = PaneState::new();
         pane.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        pane.set_hook_authority("herdr:pi".into(), Agent::Pi, AgentState::Working, None);
+        pane.set_hook_authority("herdr:pi".into(), "pi".into(), AgentState::Working, None);
 
-        pane.release_agent("herdr:pi", Agent::Pi);
+        pane.release_agent("herdr:pi", "pi");
 
         assert!(pane.hook_authority.is_none());
         assert_eq!(pane.detected_agent, None);
