@@ -100,8 +100,16 @@ fn release_notes_from_stored(
         return None;
     }
 
+    let preview = match (
+        crate::update::Version::parse(&stored.version),
+        crate::update::Version::parse(current_version),
+    ) {
+        (Some(stored_version), Some(current_version)) => stored_version > current_version,
+        _ => false,
+    };
+
     Some(ReleaseNotes {
-        preview: stored.version != current_version,
+        preview,
         version: stored.version,
         body,
     })
@@ -209,6 +217,24 @@ mod tests {
         assert_eq!(notes.version, "0.3.2");
         assert_eq!(notes.body, "### Changed\n- One");
         assert!(notes.preview);
+
+        clear_pending_at(&path).unwrap();
+    }
+
+    #[test]
+    fn load_latest_does_not_mark_older_saved_version_as_preview() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-release-notes-{}-{}.json",
+            std::process::id(),
+            "stale"
+        ));
+        let _ = clear_pending_at(&path);
+        save_pending_to_path(&path, "0.3.0", "### Changed\n- One").unwrap();
+
+        let notes = load_latest_from_path(&path, "0.3.1").expect("latest notes");
+        assert_eq!(notes.version, "0.3.0");
+        assert_eq!(notes.body, "### Changed\n- One");
+        assert!(!notes.preview);
 
         clear_pending_at(&path).unwrap();
     }

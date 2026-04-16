@@ -1384,6 +1384,23 @@ mod tests {
     }
 
     #[test]
+    fn startup_does_not_restore_update_available_from_older_saved_notes() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("startup-stale-update-notes");
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        crate::release_notes::save_pending("0.4.9", "### Changed\n- One").unwrap();
+
+        let app = test_app();
+
+        assert_eq!(app.state.update_available, None);
+        assert!(app.state.latest_release_notes_available);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_keybinds_updates_live_state() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-keybinds-success");
