@@ -157,21 +157,32 @@ struct TerminalGuard {
     in_tmux: bool,
 }
 
+fn write_terminal_restore_postlude(writer: &mut impl io::Write) -> io::Result<()> {
+    // Restore a visible cursor and reset DECSCUSR back to the terminal default.
+    writer.write_all(b"\x1b[?25h\x1b[0 q")?;
+    writer.flush()
+}
+
+fn restore_terminal_state(in_tmux: bool) {
+    // Reset modifyOtherKeys if we enabled it.
+    if in_tmux {
+        let _ = io::stdout().write_all(b"\x1b[>4;0m");
+        let _ = io::stdout().flush();
+    }
+
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
+    ratatui::restore();
+    let _ = write_terminal_restore_postlude(&mut io::stdout());
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        // Reset modifyOtherKeys if we enabled it.
-        if self.in_tmux {
-            let _ = io::stdout().write_all(b"\x1b[>4;0m");
-            let _ = io::stdout().flush();
-        }
-
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
-        ratatui::restore();
+        restore_terminal_state(self.in_tmux);
     }
 }
 
@@ -280,16 +291,7 @@ pub fn run_client() -> io::Result<()> {
     let in_tmux = std::env::var("TMUX").is_ok();
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if in_tmux {
-            let _ = io::stdout().write_all(b"\x1b[>4;0m");
-        }
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
-        ratatui::restore();
+        restore_terminal_state(in_tmux);
         original_hook(info);
     }));
 
@@ -630,6 +632,13 @@ mod tests {
             output,
             crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes()
         );
+    }
+
+    #[test]
+    fn terminal_restore_postlude_restores_visible_default_cursor() {
+        let mut output = Vec::new();
+        write_terminal_restore_postlude(&mut output).unwrap();
+        assert_eq!(output, b"\x1b[?25h\x1b[0 q");
     }
 
     #[test]
