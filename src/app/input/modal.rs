@@ -121,7 +121,10 @@ pub(super) fn request_quit_or_detach(state: &mut AppState) {
 
 pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
     match action {
-        GlobalMenuAction::Quit => request_quit_or_detach(state),
+        GlobalMenuAction::Quit => {
+            leave_modal(state);
+            request_quit_or_detach(state);
+        }
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
         GlobalMenuAction::ReloadKeybinds => {

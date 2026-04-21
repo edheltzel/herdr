@@ -2,20 +2,21 @@
 
 ## Unreleased
 
+### Breaking Changes Please Read
+- herdr now defaults to a persistent server/client session model. running `herdr` starts or reattaches to a background session server instead of launching the old single-process UI.
+- quitting the UI in default mode now detaches the current client and leaves the shared session running. use `herdr server stop` to stop the background server explicitly.
+- the old monolithic behavior is still available as an escape hatch with `herdr --no-session`.
+
 ### Added
-- herdr now defaults to a persistent server/client session model. launching `herdr` starts or reattaches to a background session server, and `herdr server stop` shuts that server down explicitly.
-- The thin client, headless server, and their integration coverage are now part of the main product, including detach and reattach flows, multi-client attach, and auto-detect launch.
+- Persistent sessions are now the default product behavior. You can detach and reattach without stopping pane processes.
+- Added the thin client and headless server as first-class product components, including auto-detect launch, explicit `herdr client`, and `herdr server stop`.
+- Sessions now restore cleanly after full restart, preserving workspaces, tabs, panes, and running process state.
+- Multi-client attach is now supported. Multiple clients can connect to the same shared session.
 
 ### Changed
 - In persistence mode, in-app quit actions now detach the current client by default instead of shutting down the whole background server.
 - The current persistence model is a shared session view across attached clients. It is not yet full tmux-style per-client independent navigation.
-
-### Fixed
-- Headless client input routing now re-encodes keys for the focused pane's negotiated keyboard protocol, fixing broken modified keys like Ghostty CSI-u `Ctrl-C` sequences reaching panes as literal text.
-- Thin-client frame blitting now resets style state correctly between cells, fixing modifier leakage artifacts such as long underline-like horizontal lines.
-- Client/server mode now restores the host terminal default foreground and background theme sync, so libghostty panes no longer fall back to a black background when attached through the persistence client.
-- Client-side persistence notifications no longer leak plain text into the pane area.
-- Clipboard copy in persistence mode now routes through attached clients correctly, and SSH sessions prefer OSC 52 over remote clipboard helpers.
+- Restored sessions now land in terminal mode, while fresh sessions still start in navigate mode.
 
 ## [0.4.11] - 2026-04-16
 

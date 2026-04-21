@@ -602,6 +602,7 @@ mod tests {
 
         assert!(app.state.detach_requested);
         assert!(!app.state.should_quit);
+        assert_ne!(app.state.mode, Mode::GlobalMenu);
     }
 
     #[test]
