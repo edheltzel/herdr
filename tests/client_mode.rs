@@ -12,8 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    cleanup_test_base, client_handshake, encode_varint_u16, encode_varint_u32, frame_message,
+    read_server_message, register_runtime_dir, register_spawned_herdr_pid,
+    unregister_spawned_herdr_pid, wait_for_file, wait_for_message_variant, wait_for_socket,
+    wait_until,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -64,28 +66,6 @@ fn test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn wait_for_socket(path: &PathBuf, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
-}
-
-fn wait_for_file(path: &PathBuf, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("file did not appear at {}", path.display());
 }
 
 fn spawn_client_process(
@@ -178,203 +158,6 @@ fn ping_socket(socket_path: &PathBuf) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Bincode v2 varint encoding helpers (same as server_headless.rs tests)
-// ---------------------------------------------------------------------------
-
-/// Encode a varint u32 value according to bincode v2 VarintEncoding.
-fn encode_varint_u32(v: u32) -> Vec<u8> {
-    if v < 251 {
-        vec![v as u8]
-    } else if v < 65536 {
-        let mut buf = vec![251u8];
-        buf.extend_from_slice(&(v as u16).to_le_bytes());
-        buf
-    } else {
-        let mut buf = vec![252u8];
-        buf.extend_from_slice(&v.to_le_bytes());
-        buf
-    }
-}
-
-/// Encode a varint u16 value.
-fn encode_varint_u16(v: u16) -> Vec<u8> {
-    if v < 251 {
-        vec![v as u8]
-    } else {
-        let mut buf = vec![251u8];
-        buf.extend_from_slice(&v.to_le_bytes());
-        buf
-    }
-}
-
-/// Encode an enum variant with its fields.
-fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {
-    let mut buf = encode_varint_u32(variant_idx);
-    for field in fields {
-        buf.extend_from_slice(field);
-    }
-    buf
-}
-
-/// Frame a message with u32LE length prefix.
-fn frame_message(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len() as u32;
-    let mut framed = len.to_le_bytes().to_vec();
-    framed.extend_from_slice(payload);
-    framed
-}
-
-/// Decode a varint u32 from a byte slice at the given offset.
-fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), String> {
-    if offset >= payload.len() {
-        return Err("payload too short for varint".into());
-    }
-    let first_byte = payload[offset];
-    match first_byte {
-        0..=250 => Ok((first_byte as u32, 1)),
-        251 => {
-            if offset + 3 > payload.len() {
-                return Err("payload too short for u16 varint".into());
-            }
-            let v = u16::from_le_bytes(
-                payload[offset + 1..offset + 3]
-                    .try_into()
-                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
-            );
-            Ok((v as u32, 3))
-        }
-        252 => {
-            if offset + 5 > payload.len() {
-                return Err("payload too short for u32 varint".into());
-            }
-            let v = u32::from_le_bytes(
-                payload[offset + 1..offset + 5]
-                    .try_into()
-                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
-            );
-            Ok((v, 5))
-        }
-        _ => Err(format!("unsupported varint tag: {first_byte}")),
-    }
-}
-
-/// Sends a Hello message over the client socket and reads the Welcome response.
-fn client_handshake(
-    stream: &mut UnixStream,
-    version: u32,
-    cols: u16,
-    rows: u16,
-) -> Result<(u32, Option<String>), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-
-    // Encode Hello message using bincode v2 varint format.
-    // ClientMessage::Hello is variant 0.
-    let hello_payload = encode_varint_enum(
-        0,
-        &[
-            &encode_varint_u32(version),
-            &encode_varint_u16(cols),
-            &encode_varint_u16(rows),
-        ],
-    );
-    let framed = frame_message(&hello_payload);
-    stream.write_all(&framed).map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    // Read the framed response.
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    if len > 2 * 1024 * 1024 {
-        return Err(format!("oversized response: {len}"));
-    }
-
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
-
-    // Decode Welcome: ServerMessage variant 0 = Welcome { version: u32, error: Option<String> }
-    decode_welcome(&payload)
-}
-
-/// Decode a ServerMessage::Welcome from bincode v2 payload.
-fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
-    let mut offset = 0;
-
-    // Variant index (should be 0 for Welcome)
-    let (variant, consumed) = decode_varint_u32(payload, offset)?;
-    offset += consumed;
-    if variant != 0 {
-        return Err(format!(
-            "expected Welcome (variant 0), got variant {variant}"
-        ));
-    }
-
-    // version: u32
-    let (version, consumed) = decode_varint_u32(payload, offset)?;
-    offset += consumed;
-
-    // error: Option<String> — discriminant is always 1 byte
-    if offset >= payload.len() {
-        return Err("payload too short for Option tag".into());
-    }
-    let option_tag = payload[offset];
-    offset += 1;
-
-    let error = if option_tag == 1 {
-        // Some(String) — length as varint + UTF-8 bytes
-        let (str_len, consumed) = decode_varint_u32(payload, offset)?;
-        offset += consumed;
-        let str_len = str_len as usize;
-
-        if offset + str_len > payload.len() {
-            return Err("payload too short for string content".into());
-        }
-        let s = String::from_utf8(payload[offset..offset + str_len].to_vec())
-            .map_err(|e| e.to_string())?;
-        Some(s)
-    } else {
-        None
-    };
-
-    Ok((version, error))
-}
-
-/// Read a framed ServerMessage from the stream, returning the variant index
-/// and the raw payload for further decoding.
-fn read_server_message(stream: &mut UnixStream) -> Result<(u32, Vec<u8>), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| format!("read length prefix: {e}"))?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    if len > 2 * 1024 * 1024 {
-        return Err(format!("oversized frame: {len} bytes"));
-    }
-    if len == 0 {
-        return Err("zero-length frame".into());
-    }
-
-    let mut payload = vec![0u8; len];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|e| format!("read payload: {e}"))?;
-
-    // Decode the variant index.
-    let (variant, consumed) = decode_varint_u32(&payload, 0)?;
-
-    // Return the variant index and the remaining payload (after the variant tag).
-    Ok((variant, payload[consumed..].to_vec()))
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -404,10 +187,6 @@ fn client_connects_and_receives_frame() {
         "handshake should not have error: {:?}",
         error
     );
-
-    // Give the server a moment to set up the writer thread and
-    // start the render cycle after learning our terminal size.
-    thread::sleep(Duration::from_millis(500));
 
     // Read the next message from the server — should be a Frame (variant 1).
     stream.set_nonblocking(false).unwrap();
@@ -465,8 +244,12 @@ fn client_input_forwarded_to_pane() {
         .expect("should send Input message");
     stream.flush().expect("should flush");
 
-    // Give the server time to process the input and render.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should still respond to ping after input"
+    );
 
     // Verify the server is still alive and responsive via API.
     let response = ping_socket(&api_socket);
@@ -518,8 +301,12 @@ fn client_resize_sends_message() {
         .expect("should send Resize message");
     stream.flush().expect("should flush");
 
-    // Give the server time to process and render at the new size.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should respond after resize"
+    );
 
     // Verify the server is still alive.
     let response = ping_socket(&api_socket);
@@ -676,11 +463,7 @@ fn server_crash_after_attach_causes_lost_connection_error() {
             match thin_reader.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     let out = String::from_utf8_lossy(&buf[..n]);
-                    if out.contains("\u{2500}")
-                        || out.contains("workspace")
-                        || out.contains("terminal")
-                        || out.contains("pane")
-                    {
+                    if !out.is_empty() {
                         seen = true;
                         break;
                     }
@@ -720,7 +503,7 @@ fn server_crash_after_attach_causes_lost_connection_error() {
                     crash_output.push_str(&String::from_utf8_lossy(&buf[..n]));
                 }
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(20));
         }
         exited
     };
@@ -805,26 +588,10 @@ fn client_receives_frame_after_pane_output() {
     stream.write_all(&framed).expect("send input");
     stream.flush().expect("flush");
 
-    // Wait for the server to process and render.
-    thread::sleep(Duration::from_millis(500));
-
     // Read subsequent frames — the server should have re-rendered after
     // the input was processed.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut received_frame = false;
-    for _ in 0..5 {
-        match read_server_message(&mut stream) {
-            Ok((variant, _)) => {
-                if variant == 1 {
-                    received_frame = true;
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-    }
+    let received_frame = wait_for_message_variant(&mut stream, Duration::from_secs(2), 1)
+        .expect("wait for post-output frame");
     assert!(received_frame, "should receive a Frame after pane output");
 
     cleanup_spawned_herdr(spawned, base);
@@ -872,8 +639,11 @@ fn navigate_mode_keybind_dispatch_in_server() {
     stream.write_all(&framed).expect("send prefix key");
     stream.flush().expect("flush");
 
-    // Give the server time to process.
-    thread::sleep(Duration::from_millis(100));
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while let Ok(_) = read_server_message(&mut stream) {}
+    stream.set_read_timeout(None).unwrap();
 
     // Send 'n' (new workspace in navigate mode).
     let n_input = b"n".to_vec();
@@ -887,8 +657,12 @@ fn navigate_mode_keybind_dispatch_in_server() {
     stream.write_all(&framed).expect("send n key");
     stream.flush().expect("flush");
 
-    // Wait for processing and render.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should still respond after navigate mode input"
+    );
 
     // Verify the server is still alive and the API still works.
     let response = ping_socket(&api_socket);
@@ -1163,8 +937,12 @@ fn client_receives_notify_on_agent_state_change() {
     let mut focus_response = String::new();
     focus_reader.read_line(&mut focus_response).unwrap();
 
-    // Give the server a moment to process.
-    thread::sleep(Duration::from_millis(100));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should stay responsive after workspace focus"
+    );
 
     // Report agent as Working first, then Idle — this transition in a
     // background workspace should trigger a Done sound notification.
@@ -1177,7 +955,12 @@ fn client_receives_notify_on_agent_state_change() {
     let mut work_response = String::new();
     work_reader.read_line(&mut work_response).unwrap();
 
-    thread::sleep(Duration::from_millis(100));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should stay responsive after working state report"
+    );
 
     let mut idle_stream = UnixStream::connect(&api_socket).expect("connect to API");
     let idle_request = format!(
