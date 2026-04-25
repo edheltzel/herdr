@@ -109,7 +109,7 @@ jobs:
               '**Next steps:**',
               '1. Open an issue describing what you want to change and why',
               '2. Keep it concise and write in your own voice',
-              '3. If a maintainer approves with `lgtm`, you will be added to the approved contributors list',
+              '3. If a maintainer approves with `/approve`, you will be added to the approved contributors list',
               '4. Then you can submit your PR',
               '',
               `This PR will be closed automatically. See https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${defaultBranch}/CONTRIBUTING.md for more details.`,

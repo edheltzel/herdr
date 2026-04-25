@@ -26,7 +26,7 @@ If you have a suggestion, disagreement, or contradiction with the current produc
 
 We use an approval gate for new contributors.
 
-Before opening your first PR, open an issue describing what you want to change and why. Keep it short. Write in your own voice. If you intend to implement it yourself, add the `intends-to-pr` label. A maintainer will comment `lgtm` if the direction is approved. Once approved, you can open PRs.
+Before opening your first PR, open an issue describing what you want to change and why. Keep it short. Write in your own voice. If you intend to implement it yourself, add the `intends-to-pr` label. A maintainer will comment `/approve` if the direction is approved. Once approved, you can open PRs.
 
 This exists because AI makes it trivial to generate plausible-looking contributions that do not fit the app.
 
