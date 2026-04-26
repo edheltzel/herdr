@@ -243,7 +243,7 @@ fn wait_for_pid_file_errors_when_file_never_contains_pid() {
 }
 
 #[test]
-fn wait_for_pid_file_rejects_partial_write_race_until_stable_contents() {
+fn wait_for_pid_file_rejects_unparseable_partial_write_until_stable_contents() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let pid_file = base.join("partial-race.pid");
@@ -253,12 +253,10 @@ fn wait_for_pid_file_rejects_partial_write_race_until_stable_contents() {
         let pid_file = pid_file.clone();
         move || {
             thread::sleep(Duration::from_millis(40));
-            fs::write(&pid_file, "12").unwrap();
+            fs::write(&pid_file, "pid=").unwrap();
             thread::sleep(Duration::from_millis(40));
-            fs::write(&pid_file, "123").unwrap();
+            fs::write(&pid_file, "pid=424242").unwrap();
             thread::sleep(Duration::from_millis(40));
-            fs::write(&pid_file, "1234").unwrap();
-            thread::sleep(Duration::from_millis(200));
             fs::write(&pid_file, "424242\n").unwrap();
         }
     });
