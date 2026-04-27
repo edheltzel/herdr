@@ -7,6 +7,9 @@
 
 ### Fixed
 - Persistent server startup now surfaces config diagnostics in attached clients instead of silently hiding parse or validation errors.
+- Pane backgrounds now stay transparent when the host terminal background color is unknown, while explicit terminal cell backgrounds still render correctly.
+- Persistent-session toast and sound notifications now target the foreground attached client instead of firing across every connected client.
+- Claude Code subagent hook events no longer make the parent Claude pane look idle or released when a subagent finishes, and permissioned tool-call completion keeps the pane in the correct working state.
 
 ## [0.5.1] - 2026-04-25
 
