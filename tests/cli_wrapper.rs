@@ -349,13 +349,34 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
 }
 
 #[test]
-fn claude_hook_suppresses_subagent_reports() {
-    let subagent_input = r#"{"hook_event_name":"PermissionRequest","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+fn claude_hook_reports_subagent_working_and_blocked() {
+    let subagent_input = r#"{"hook_event_name":"Notification","agent_id":"agent-abc123","agent_type":"Explore","notification_type":"permission_prompt"}"#;
 
-    assert!(run_claude_hook("working", subagent_input).is_none());
-    assert!(run_claude_hook("blocked", subagent_input).is_none());
-    assert!(run_claude_hook("idle", subagent_input).is_none());
-    assert!(run_claude_hook("release", subagent_input).is_none());
+    let working =
+        run_claude_hook("working", subagent_input).expect("subagent working should report working");
+    assert_eq!(working["method"], "pane.report_agent");
+    assert_eq!(working["params"]["state"], "working");
+
+    let blocked =
+        run_claude_hook("blocked", subagent_input).expect("subagent blocked should report blocked");
+    assert_eq!(blocked["method"], "pane.report_agent");
+    assert_eq!(blocked["params"]["state"], "blocked");
+}
+
+#[test]
+fn claude_hook_converts_subagent_idle_and_release_to_working() {
+    let subagent_input =
+        r#"{"hook_event_name":"SubagentStop","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+
+    let idle = run_claude_hook("idle", subagent_input)
+        .expect("subagent idle should keep parent pane working");
+    assert_eq!(idle["method"], "pane.report_agent");
+    assert_eq!(idle["params"]["state"], "working");
+
+    let release = run_claude_hook("release", subagent_input)
+        .expect("subagent release should keep parent pane working");
+    assert_eq!(release["method"], "pane.report_agent");
+    assert_eq!(release["params"]["state"], "working");
 }
 
 #[test]

@@ -46,8 +46,8 @@ if hook_input_file:
         hook_input = {}
 
 is_subagent = bool(hook_input.get("agent_id"))
-if is_subagent:
-    raise SystemExit(0)
+if is_subagent and action in ("idle", "release"):
+    action = "working"
 
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 if action == "release":
