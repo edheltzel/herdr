@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -284,6 +284,90 @@ fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     let mut reader = BufReader::new(stream);
     reader.read_line(&mut line).unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut line = String::new();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    reader.read_line(&mut line).unwrap();
+                    stream
+                        .write_all(br#"{"id":"test","result":{"type":"ok"}}"#)
+                        .unwrap();
+                    stream.write_all(b"\n").unwrap();
+                    stream.flush().unwrap();
+                    return Some(line);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("accept failed: {err}"),
+            }
+        }
+        None
+    });
+
+    let hook_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    let mut child = Command::new("bash")
+        .arg(hook_path)
+        .arg(action)
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env("HERDR_PANE_ID", "p_test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(hook_input.as_bytes()).unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook failed: status={:?} stderr={} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let request = server.join().unwrap();
+    cleanup_test_base(&base);
+    request.map(|line| serde_json::from_str(&line).unwrap())
+}
+
+#[test]
+fn claude_hook_suppresses_subagent_reports() {
+    let subagent_input = r#"{"hook_event_name":"PermissionRequest","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+
+    assert!(run_claude_hook("working", subagent_input).is_none());
+    assert!(run_claude_hook("blocked", subagent_input).is_none());
+    assert!(run_claude_hook("idle", subagent_input).is_none());
+    assert!(run_claude_hook("release", subagent_input).is_none());
+}
+
+#[test]
+fn claude_hook_keeps_parent_agent_type_only_blocked() {
+    let request = run_claude_hook(
+        "blocked",
+        r#"{"hook_event_name":"PermissionRequest","agent_type":"Explore"}"#,
+    )
+    .expect("parent blocked should still report blocked");
+
+    assert_eq!(request["method"], "pane.report_agent");
+    assert_eq!(request["params"]["state"], "blocked");
 }
 
 #[test]
