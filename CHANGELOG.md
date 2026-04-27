@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.2] - 2026-04-27
+
 ### Added
 - Config can now be reloaded in the running app/server from the global menu or with `herdr server reload-config`, applying safe live settings without restarting the persistent server.
 
