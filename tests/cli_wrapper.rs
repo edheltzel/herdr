@@ -29,6 +29,19 @@ struct SpawnedHerdr {
     child: Box<dyn Child + Send + Sync>,
 }
 
+struct SpawnedServerProcess {
+    child: std::process::Child,
+}
+
+impl Drop for SpawnedServerProcess {
+    fn drop(&mut self) {
+        let pid = self.child.id();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        unregister_spawned_herdr_pid(Some(pid));
+    }
+}
+
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
@@ -69,6 +82,91 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
     spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+}
+
+fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
+fn named_session_socket(config_home: &Path, session: &str) -> PathBuf {
+    config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join(session)
+        .join("herdr.sock")
+}
+
+fn spawn_named_server(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+) -> SpawnedServerProcess {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(
+        config_home.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(["--session", session, "server"])
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = command.spawn().unwrap();
+    register_spawned_herdr_pid(Some(child.id()));
+    SpawnedServerProcess { child }
+}
+
+fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::process::Output {
+    run_named_cli_with_socket_override(config_home, runtime_dir, args, None)
+}
+
+fn run_named_cli_with_socket_override(
+    config_home: &Path,
+    runtime_dir: &Path,
+    args: &[&str],
+    socket_override: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(args)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV");
+    if let Some(socket_override) = socket_override {
+        command.env("HERDR_SOCKET_PATH", socket_override);
+    } else {
+        command.env_remove("HERDR_SOCKET_PATH");
+    }
+    command.output().unwrap()
+}
+
+fn run_named_cli_json(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> serde_json::Value {
+    let output = run_named_cli(config_home, runtime_dir, args);
+    assert!(
+        output.status.success(),
+        "command failed: herdr {}\nstatus: {:?}\nstderr: {}\nstdout: {}",
+        args.join(" "),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn spawn_herdr_with_path(
@@ -472,6 +570,7 @@ fn help_commands_exit_successfully() {
         &["tab", "-h"],
         &["pane", "-h"],
         &["wait", "-h"],
+        &["session", "-h"],
         &["integration", "-h"],
     ];
 
@@ -509,6 +608,166 @@ fn removed_show_changelog_flag_fails_before_nested_guard() {
         !stderr.contains("nested herdr"),
         "unknown flag should be rejected before nested guard: {stderr}"
     );
+}
+
+#[test]
+fn named_sessions_use_separate_servers_and_workspace_state() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
+    let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
+
+    wait_for_socket(
+        &named_session_socket(&config_home, "alpha"),
+        Duration::from_secs(5),
+    );
+    wait_for_socket(
+        &named_session_socket(&config_home, "beta"),
+        Duration::from_secs(5),
+    );
+
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "alpha",
+            "workspace",
+            "create",
+            "--label",
+            "alpha-ws",
+            "--no-focus",
+        ],
+    );
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "beta",
+            "workspace",
+            "create",
+            "--label",
+            "beta-ws",
+            "--no-focus",
+        ],
+    );
+
+    let alpha_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "workspace", "list"],
+    );
+    let beta_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "workspace", "list"],
+    );
+
+    let alpha_labels: Vec<_> = alpha_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    let beta_labels: Vec<_> = beta_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(alpha_labels, vec!["alpha-ws"]);
+    assert_eq!(beta_labels, vec!["beta-ws"]);
+
+    let beta_via_explicit_session = run_named_cli_with_socket_override(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "workspace", "list"],
+        Some(&named_session_socket(&config_home, "alpha")),
+    );
+    assert!(
+        beta_via_explicit_session.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&beta_via_explicit_session.stderr)
+    );
+    let beta_via_explicit_session: serde_json::Value =
+        serde_json::from_slice(&beta_via_explicit_session.stdout).unwrap();
+    let labels_via_explicit: Vec<_> = beta_via_explicit_session["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels_via_explicit, vec!["beta-ws"]);
+
+    let sessions = run_named_cli_json(&config_home, &runtime_dir, &["session", "list"]);
+    let sessions = sessions["sessions"].as_array().unwrap();
+    let default_session = sessions
+        .iter()
+        .find(|session| session["name"] == "default")
+        .unwrap();
+    let alpha_session = sessions
+        .iter()
+        .find(|session| session["name"] == "alpha")
+        .unwrap();
+    let beta_session = sessions
+        .iter()
+        .find(|session| session["name"] == "beta")
+        .unwrap();
+    assert_eq!(default_session["default"], true);
+    assert_eq!(default_session["running"], false);
+    assert_eq!(alpha_session["running"], true);
+    assert_eq!(beta_session["running"], true);
+    assert!(alpha_session["socket_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/alpha/herdr.sock"));
+    assert!(beta_session["session_dir"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/beta"));
+
+    let delete_running = run_named_cli(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    assert_eq!(delete_running.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_running.stderr).contains("stop it before deleting"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_running.stderr)
+    );
+
+    let delete_default = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "delete", "default"],
+    );
+    assert_eq!(delete_default.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_default.stderr).contains("default session"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_default.stderr)
+    );
+
+    let stopped_alpha =
+        run_named_cli_json(&config_home, &runtime_dir, &["session", "stop", "alpha"]);
+    assert_eq!(stopped_alpha["stopped"], true);
+    assert_eq!(stopped_alpha["session"]["running"], false);
+
+    let deleted_alpha =
+        run_named_cli_json(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    assert_eq!(deleted_alpha["deleted"], true);
+    assert!(!config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join("alpha")
+        .exists());
+
+    let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "beta"]);
+    drop(alpha);
+    drop(beta);
+    cleanup_test_base(&base);
 }
 
 #[test]

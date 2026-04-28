@@ -6,6 +6,15 @@ herdr reads config from:
 ~/.config/herdr/config.toml
 ```
 
+Named sessions share this config file. Sessions are runtime/socket namespaces, not workspace replacements; per-session sockets and persistent runtime state are separate:
+
+```text
+~/.config/herdr/session.json
+~/.config/herdr/sessions/<name>/session.json
+```
+
+Use `herdr session list`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage named session namespaces.
+
 print the full default config with:
 
 ```bash
