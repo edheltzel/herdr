@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.5.3] - 2026-04-30
+
 ### Added
 - Added named persistent sessions, so you can keep separate herdr environments for different projects or contexts while sharing the same global config. See the docs for the full session CLI. (#57, thanks @fbettag)
 - Added `herdr status`, `herdr status server`, and `herdr status client` to inspect the local client, running server, protocol compatibility, socket path, and whether a restart is needed.
