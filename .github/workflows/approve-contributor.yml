@@ -2,7 +2,7 @@ name: Approve Contributor
 
 on:
   issue_comment:
-    types: [created]
+    types: [created, edited]
 
 jobs:
   approve:
@@ -29,8 +29,8 @@ jobs:
             const commentBody = context.payload.comment.body || '';
             const approvedFile = '.github/APPROVED_CONTRIBUTORS';
 
-            if (!/^\s*lgtm\b/i.test(commentBody)) {
-              console.log('Comment does not match lgtm');
+            if (!/(^|\s)\/approve(?=$|\s)/i.test(commentBody)) {
+              console.log('Comment does not contain /approve');
               core.setOutput('status', 'skipped');
               return;
             }

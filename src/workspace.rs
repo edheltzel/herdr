@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
-use tracing::info;
 
 use crate::events::AppEvent;
 use crate::layout::PaneId;
@@ -96,7 +95,6 @@ impl Workspace {
         )?;
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(tab.root_pane, 1);
-        info!(root_pane = tab.root_pane.raw(), "workspace created");
         Ok(Self {
             id: generate_workspace_id(),
             custom_name: None,

@@ -30,6 +30,17 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
+const PANE_TERM: &str = "xterm-256color";
+const PANE_COLORTERM: &str = "truecolor";
+
+fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
+    // Each pane is rendered by herdr's own terminal layer, not the outer terminal
+    // that launched the app. Advertising the inherited TERM leaks the host terminal
+    // identity into shells and across SSH, which breaks redraw and cursor movement
+    // when the remote side lacks matching terminfo entries.
+    cmd.env("TERM", PANE_TERM);
+    cmd.env("COLORTERM", PANE_COLORTERM);
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PendingAgentRelease {
@@ -246,6 +257,7 @@ impl PaneRuntime {
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        apply_pane_terminal_env(&mut cmd);
         crate::integration::apply_pane_env(&mut cmd, pane_id);
         Self::spawn_command_builder(
             pane_id,
@@ -279,6 +291,7 @@ impl PaneRuntime {
         cmd.arg(command);
         cmd.cwd(cwd);
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
+        apply_pane_terminal_env(&mut cmd);
         crate::integration::apply_pane_env(&mut cmd, pane_id);
         for (key, value) in extra_env {
             cmd.env(key, value);
@@ -322,10 +335,7 @@ impl PaneRuntime {
         // --- Writer channel ---
         let (input_tx, mut input_rx) = mpsc::channel::<Bytes>(32);
 
-        info!(
-            pane = pane_id.raw(),
-            rows, cols, scrollback_limit_bytes, "spawning pane terminal"
-        );
+        crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -355,11 +365,16 @@ impl PaneRuntime {
                     Ok(mut child) => {
                         if let Some(pid) = child.process_id() {
                             child_pid.store(pid, Ordering::Release);
-                            info!(pane = pane_id.raw(), pid, "child spawned");
+                            crate::logging::pane_spawned(pane_id.raw(), pid);
                         }
                         match child.wait() {
-                            Ok(status) => info!(pane = pane_id.raw(), ?status, "child exited"),
-                            Err(e) => error!(pane = pane_id.raw(), err = %e, "child wait failed"),
+                            Ok(status) => {
+                                let status_text = format!("{status:?}");
+                                crate::logging::pane_exited(pane_id.raw(), &status_text);
+                            }
+                            Err(e) => {
+                                crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string())
+                            }
                         }
                     }
                     Err(e) => error!(pane = pane_id.raw(), err = %e, "{spawn_error_message}"),
@@ -858,6 +873,58 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture_shell_output(command: &str, extra_env: &[(&str, &str)]) -> String {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let output_path = std::env::temp_dir().join(format!(
+            "herdr-pane-term-test-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(format!("{command} > '{}'", output_path.display()));
+        cmd.cwd(std::env::current_dir().unwrap());
+        cmd.env("TERM", "xterm-ghostty");
+        cmd.env("COLORTERM", "falsecolor");
+        apply_pane_terminal_env(&mut cmd);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "shell command failed: {status:?}");
+
+        let output = std::fs::read_to_string(&output_path).unwrap();
+        let _ = std::fs::remove_file(output_path);
+        output
+    }
+
+    #[test]
+    fn pane_terminal_identity_overrides_outer_terminal_env() {
+        let output = capture_shell_output("printf '%s\\n%s\\n' \"$TERM\" \"$COLORTERM\"", &[]);
+        assert_eq!(output, "xterm-256color\ntruecolor\n");
+    }
+
+    #[test]
+    fn pane_terminal_identity_allows_explicit_override() {
+        let output = capture_shell_output(
+            "printf '%s\\n%s\\n' \"$TERM\" \"$COLORTERM\"",
+            &[("TERM", "vt100"), ("COLORTERM", "24bit")],
+        );
+        assert_eq!(output, "vt100\n24bit\n");
+    }
 
     #[tokio::test]
     async fn focus_events_are_forwarded_when_enabled() {

@@ -182,7 +182,7 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds", "reload keybinds"];
+        let mut labels = vec!["settings", "keybinds", "reload config"];
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -242,6 +242,7 @@ impl AppState {
         let width = divider_col.saturating_sub(sidebar.x).saturating_add(1);
         self.sidebar_width =
             width.clamp(crate::ui::MIN_SIDEBAR_WIDTH, crate::ui::MAX_SIDEBAR_WIDTH);
+        self.sidebar_width_source = crate::app::state::SidebarWidthSource::Manual;
         self.mark_session_dirty();
     }
 
@@ -530,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_reload_keybinds_menu_item_requests_reload() {
+    fn clicking_reload_config_menu_item_requests_reload() {
         let mut app = app_for_mouse_test();
         let launcher = app.state.global_launcher_rect();
         app.handle_mouse(mouse(
@@ -546,7 +547,7 @@ mod tests {
             menu.y + 3,
         ));
 
-        assert!(app.state.request_reload_keybinds);
+        assert!(app.state.request_reload_config);
         assert_eq!(app.state.mode, Mode::Navigate);
     }
 
@@ -568,7 +569,7 @@ mod tests {
             vec![
                 "settings",
                 "keybinds",
-                "reload keybinds",
+                "reload config",
                 "update ready",
                 "quit"
             ]
@@ -590,7 +591,7 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "reload keybinds", "detach"]
+            vec!["settings", "keybinds", "reload config", "detach"]
         );
 
         let menu = app.state.global_menu_rect();
@@ -615,7 +616,7 @@ mod tests {
             vec![
                 "settings",
                 "keybinds",
-                "reload keybinds",
+                "reload config",
                 "what's new",
                 "quit"
             ]
@@ -1120,6 +1121,7 @@ mod tests {
         first.tabs[0]
             .pane_cwds
             .insert(first_root, first_repo.clone());
+        first.refresh_git_ahead_behind();
 
         let mut second = Workspace::test_new("b");
         let second_root = second.tabs[0].root_pane;
@@ -1127,6 +1129,7 @@ mod tests {
         second.tabs[0]
             .pane_cwds
             .insert(second_root, second_repo.clone());
+        second.refresh_git_ahead_behind();
 
         app.state.workspaces = vec![first, second];
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));

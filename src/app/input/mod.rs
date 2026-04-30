@@ -36,12 +36,12 @@ pub(crate) use self::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
         handle_keybind_help_key, handle_rename_key, handle_resize_key,
     },
-    navigate::{handle_navigate_key, terminal_direct_navigation_action},
+    navigate::terminal_direct_navigation_action,
+    settings::open_settings,
 };
 use self::{
     modal::{
-        modal_action_from_key, ModalAction, ONBOARDING_NOTIFICATION_ACTIONS,
-        ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
+        modal_action_from_key, ModalAction, ONBOARDING_WELCOME_ACTIONS, RELEASE_NOTES_ACTIONS,
     },
     settings::SettingsAction,
 };
@@ -56,12 +56,13 @@ impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Navigate => self.handle_navigate_key(key),
             _ => {
                 let key = key.as_key_event();
                 match self.state.mode {
                     Mode::Onboarding => self.handle_onboarding_key(key),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key),
-                    Mode::Navigate => self.handle_navigate_key(key),
+                    Mode::Navigate => unreachable!(),
                     Mode::RenameWorkspace | Mode::RenameTab => {
                         handle_rename_key(&mut self.state, key)
                     }
@@ -89,32 +90,11 @@ impl App {
     }
 
     pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
-        match self.state.onboarding_step {
-            0 => match key.code {
-                KeyCode::Right | KeyCode::Char('l') => {
-                    self.state.onboarding_step = 1;
-                }
-                _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
-                    Some(ModalAction::Continue) => self.state.onboarding_step = 1,
-                    _ => {}
-                },
-            },
-            _ => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => self.state.onboarding_list.move_prev(),
-                KeyCode::Down | KeyCode::Char('j') => self.state.onboarding_list.move_next(4),
-                KeyCode::Left | KeyCode::Char('h') => {
-                    self.state.onboarding_step = 0;
-                }
-                KeyCode::Char(c) if ('1'..='4').contains(&c) => {
-                    self.state
-                        .onboarding_list
-                        .select((c as usize) - ('1' as usize));
-                }
-                _ => match modal_action_from_key(&key, ONBOARDING_NOTIFICATION_ACTIONS) {
-                    Some(ModalAction::Back) => self.state.onboarding_step = 0,
-                    Some(ModalAction::Save) => self.complete_onboarding(),
-                    _ => {}
-                },
+        match key.code {
+            KeyCode::Right | KeyCode::Char('l') => self.open_settings_from_onboarding(),
+            _ => match modal_action_from_key(&key, ONBOARDING_WELCOME_ACTIONS) {
+                Some(ModalAction::Continue) => self.open_settings_from_onboarding(),
+                _ => {}
             },
         }
     }
@@ -159,6 +139,8 @@ impl App {
 
             if is_double_click {
                 self.state.sidebar_width = self.state.default_sidebar_width;
+                self.state.sidebar_width_source =
+                    crate::app::state::SidebarWidthSource::ConfigDefault;
                 self.state.sidebar_width_auto = false;
                 self.state.mark_session_dirty();
                 self.state.drag = None;
@@ -170,7 +152,7 @@ impl App {
             match action {
                 SettingsAction::SaveTheme(name) => self.save_theme(&name),
                 SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
-                SettingsAction::SaveToast(enabled) => self.save_toast(enabled),
+                SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
             }
         }
 

@@ -127,3 +127,34 @@ jobs:
             herdr-macos-x86_64/herdr-macos-x86_64
             herdr-macos-aarch64/herdr-macos-aarch64
           body_path: RELEASE_NOTES.md
+
+  update-latest-json:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Update website latest manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CURRENT_VERSION=$(python3 -c 'import json; print(json.load(open("website/latest.json")).get("version", ""))')
+          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+            echo "website/latest.json is already at v$VERSION"
+            exit 0
+          fi
+          python3 scripts/changelog.py sync-latest-json --version "$VERSION" --output website/latest.json
+
+      - name: Commit website latest manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add website/latest.json
+          git diff --cached --quiet || git commit -m "docs: update website manifest for v$VERSION"
+          git push origin master

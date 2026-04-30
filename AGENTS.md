@@ -38,8 +38,8 @@ After the change is integrated, remove the task worktree and delete the task bra
 ## Testing
 
 ```bash
-just test               # cargo tests + maintenance script tests
-just check              # formatting check + cargo tests + maintenance script tests
+just test               # cargo nextest + maintenance script tests
+just check              # formatting check + cargo nextest + maintenance script tests
 ```
 
 Default flow: run `just check` before committing.
@@ -49,6 +49,8 @@ Unit tests live next to the code (`#[cfg(test)] mod tests`). If you add behavior
 ## Conventions
 
 - Conventional commits, lowercase, no emojis.
+- Do not edit `CHANGELOG.md` during normal feature or fix work. Changelog entries are drafted and applied immediately before release.
+- When a commit fully fixes a GitHub issue, include `fixes #<issue-number>` in the commit body so GitHub closes it on merge.
 - Rust: no `unwrap()` in production code. `tracing` for logging. `#[allow]` only with a comment explaining why.
 - Don't bypass checks. If tests fail, fix them before committing.
 - Don't add dependencies without a reason. Check if the existing deps cover it first.
@@ -62,23 +64,16 @@ Default release flow:
 ```bash
 just check
 just release 0.x.y
-# wait for the GitHub release and all four binary assets to exist
-just update-latest-json 0.x.y
-just verify-release-state 0.x.y
 ```
 
-`just release 0.x.y` prepares the changelog entry, bumps `Cargo.toml`, runs tests, commits, tags, and pushes. GitHub Actions builds the binaries after the tag is pushed.
+`just release 0.x.y` prepares the changelog entry, bumps `Cargo.toml`, runs tests, commits, tags, and pushes. GitHub Actions builds the binaries after the tag is pushed, creates the GitHub release, uploads all four binary assets, then updates `website/latest.json` on `master` automatically.
 
-`just update-latest-json 0.x.y` is the post-release website step. It uses `gh release view` against `ogulcancelik/herdr`, verifies the published release exists, rejects draft or prerelease releases, requires a non-empty release body, requires these four assets to exist, and only then rewrites `website/latest.json`:
+The release workflow must publish these four assets:
 
 - `herdr-linux-x86_64`
 - `herdr-linux-aarch64`
 - `herdr-macos-x86_64`
 - `herdr-macos-aarch64`
-
-It also refuses to run if `website/latest.json` is already at the same or newer version. It leaves the file unstaged and prints the next commands to review, commit, and push.
-
-`just verify-release-state 0.x.y` is the final read-only verification step. It checks that the published GitHub release, the local `website/latest.json`, the live `https://herdr.dev/latest.json`, and the release asset URLs all match the same version and manifest contents.
 
 `website/latest.json` is the shipped updater source of truth. Keep its schema aligned with `src/update.rs`:
 

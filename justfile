@@ -1,14 +1,14 @@
 # herdr task runner
 
-# Run unit tests
+# Run tests
 test:
-    cargo test
+    cargo nextest run
     python3 -m unittest scripts.test_changelog scripts.test_vendor_libghostty_vt
 
 # Run PR CI checks
 ci:
     cargo fmt --check
-    cargo test
+    cargo nextest run
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
@@ -28,7 +28,7 @@ build:
 build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
-# Finalize changelog, bump version, commit, tag, push, trigger release build (usage: just release 0.1.1)
+# Finalize changelog, bump version, commit, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:
     @if [ -n "$(git status --porcelain)" ]; then \
         echo "error: commit your changes first"; \
@@ -46,15 +46,7 @@ release version:
     git diff --cached --quiet || git commit -m "release: v{{version}}"
     git tag -a v{{version}} -m "v{{version}}"
     git push --follow-tags
-    @echo "v{{version}} released — GitHub Actions building binaries"
-
-# Update website/latest.json from a published GitHub release (usage: just update-latest-json 0.1.1)
-update-latest-json version:
-    python3 scripts/changelog.py sync-latest-json --version {{version}} --output website/latest.json
-
-# Verify GitHub release, local manifest, live manifest, and asset URLs all agree (usage: just verify-release-state 0.1.1)
-verify-release-state version:
-    python3 scripts/changelog.py verify-release-state --version {{version}} --output website/latest.json
+    @echo "v{{version}} released — GitHub Actions building binaries and updating website/latest.json"
 
 # Print default config
 default-config:

@@ -77,6 +77,7 @@ pub struct App {
     pub render_notify: Arc<Notify>,
     pub render_dirty: Arc<AtomicBool>,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    pub(crate) local_terminal_notifications: bool,
 }
 
 pub(crate) enum LoopEvent {
@@ -116,6 +117,13 @@ fn auto_updates_enabled(no_session: bool) -> bool {
 
 /// Resolve the palette from config: base theme + optional custom overrides.
 fn resolve_palette(config: &crate::config::Config) -> state::Palette {
+    resolve_palette_with_legacy_accent(config, true)
+}
+
+fn resolve_palette_with_legacy_accent(
+    config: &crate::config::Config,
+    use_legacy_ui_accent: bool,
+) -> state::Palette {
     // Start with the named theme (default: catppuccin)
     let base_name = config.theme.name.as_deref().unwrap_or("catppuccin");
     let mut palette = state::Palette::from_name(base_name).unwrap_or_else(|| {
@@ -132,7 +140,8 @@ fn resolve_palette(config: &crate::config::Config) -> state::Palette {
     }
 
     // Legacy: if ui.accent is set and no theme.custom.accent, use it for compat
-    if config.ui.accent != "cyan"
+    if use_legacy_ui_accent
+        && config.ui.accent != "cyan"
         && config
             .theme
             .custom
@@ -161,59 +170,78 @@ impl App {
         let render_dirty = Arc::new(AtomicBool::new(false));
 
         // Try to restore previous session
-        let (workspaces, active, selected, agent_panel_scope, sidebar_width, sidebar_section_split) =
-            if no_session {
+        let (
+            workspaces,
+            active,
+            selected,
+            agent_panel_scope,
+            sidebar_width,
+            sidebar_width_source,
+            sidebar_section_split,
+        ) = if no_session {
+            (
+                Vec::new(),
+                None,
+                0,
+                state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
+                state::SidebarWidthSource::ConfigDefault,
+                0.5_f32,
+            )
+        } else if let Some(snap) = crate::persist::load() {
+            let ws = crate::persist::restore(
+                &snap,
+                24,
+                80,
+                config.advanced.scrollback_limit_bytes,
+                event_tx.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            );
+            if ws.is_empty() {
+                crate::logging::session_restored(0, "empty");
                 (
                     Vec::new(),
                     None,
                     0,
-                    state::AgentPanelScope::CurrentWorkspace,
-                    config.ui.sidebar_width,
-                    0.5_f32,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    if snap.sidebar_width.is_some() {
+                        state::SidebarWidthSource::Persisted
+                    } else {
+                        state::SidebarWidthSource::ConfigDefault
+                    },
+                    snap.sidebar_section_split.unwrap_or(0.5),
                 )
-            } else if let Some(snap) = crate::persist::load() {
-                let ws = crate::persist::restore(
-                    &snap,
-                    24,
-                    80,
-                    config.advanced.scrollback_limit_bytes,
-                    event_tx.clone(),
-                    render_notify.clone(),
-                    render_dirty.clone(),
-                );
-                if ws.is_empty() {
-                    info!("session file found but no workspaces restored");
-                    (
-                        Vec::new(),
-                        None,
-                        0,
-                        snap.agent_panel_scope,
-                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                        snap.sidebar_section_split.unwrap_or(0.5),
-                    )
-                } else {
-                    info!(count = ws.len(), "session restored");
-                    let active = snap.active.filter(|&i| i < ws.len());
-                    let selected = snap.selected.min(ws.len().saturating_sub(1));
-                    (
-                        ws,
-                        active,
-                        selected,
-                        snap.agent_panel_scope,
-                        snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
-                        snap.sidebar_section_split.unwrap_or(0.5),
-                    )
-                }
             } else {
+                crate::logging::session_restored(ws.len(), "ok");
+                let active = snap.active.filter(|&i| i < ws.len());
+                let selected = snap.selected.min(ws.len().saturating_sub(1));
                 (
-                    Vec::new(),
-                    None,
-                    0,
-                    state::AgentPanelScope::CurrentWorkspace,
-                    config.ui.sidebar_width,
-                    0.5_f32,
+                    ws,
+                    active,
+                    selected,
+                    snap.agent_panel_scope,
+                    snap.sidebar_width.unwrap_or(config.ui.sidebar_width),
+                    if snap.sidebar_width.is_some() {
+                        state::SidebarWidthSource::Persisted
+                    } else {
+                        state::SidebarWidthSource::ConfigDefault
+                    },
+                    snap.sidebar_section_split.unwrap_or(0.5),
                 )
-            };
+            }
+        } else {
+            (
+                Vec::new(),
+                None,
+                0,
+                state::AgentPanelScope::CurrentWorkspace,
+                config.ui.sidebar_width,
+                state::SidebarWidthSource::ConfigDefault,
+                0.5_f32,
+            )
+        };
 
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
@@ -247,15 +275,14 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
-            request_reload_keybinds: false,
+            request_reload_config: false,
+            request_client_sound_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            onboarding_step: 0,
-            onboarding_list: state::SelectionListState::new(1),
             release_notes: startup_release_notes.map(|notes| state::ReleaseNotesState {
                 version: notes.version,
                 body: notes.body,
@@ -289,10 +316,12 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
             sidebar_width,
+            sidebar_width_source,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split,
@@ -301,6 +330,7 @@ impl App {
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
             accent: crate::config::parse_color(&config.ui.accent),
             sound: config.ui.sound.clone(),
+            local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
             spinner_tick: 0,
@@ -367,6 +397,7 @@ impl App {
             render_notify,
             render_dirty,
             overlay_panes: HashMap::new(),
+            local_terminal_notifications: true,
         }
     }
 
@@ -401,7 +432,7 @@ impl App {
 
             if self.state.request_complete_onboarding {
                 self.state.request_complete_onboarding = false;
-                self.complete_onboarding();
+                self.open_settings_from_onboarding();
                 needs_render = true;
             }
 
@@ -417,9 +448,9 @@ impl App {
                 needs_render = true;
             }
 
-            if self.state.request_reload_keybinds {
-                self.state.request_reload_keybinds = false;
-                self.reload_keybinds();
+            if self.state.request_reload_config {
+                self.state.request_reload_config = false;
+                self.reload_config();
                 needs_render = true;
             }
 
@@ -528,58 +559,131 @@ impl App {
         }
     }
 
-    pub(crate) fn complete_onboarding(&mut self) {
-        let (sound_enabled, toast_enabled) = match self.state.onboarding_list.selected {
-            0 => (false, false),
-            1 => (false, true),
-            2 => (true, false),
-            _ => (true, true),
-        };
-
-        match crate::config::save_onboarding_choices(sound_enabled, toast_enabled) {
-            Ok(()) => {
-                self.state.sound.enabled = sound_enabled;
-                self.state.toast_config.enabled = toast_enabled;
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
-            Err(err) => {
-                self.state.config_diagnostic =
-                    Some(format!("failed to save onboarding config: {err}"));
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
-            }
-        }
+    pub(crate) fn open_settings_from_onboarding(&mut self) {
+        self.mark_onboarding_complete();
+        crate::app::input::open_settings(&mut self.state);
     }
 
-    pub(crate) fn reload_keybinds(&mut self) {
+    pub(crate) fn reload_config(&mut self) -> crate::config::ConfigReloadReport {
+        self.apply_config_from_disk(true)
+    }
+
+    pub(crate) fn apply_config_from_disk(
+        &mut self,
+        notify_success: bool,
+    ) -> crate::config::ConfigReloadReport {
         let previous_toast = self.state.toast.clone();
-        match crate::config::load_live_keybinds() {
-            Ok(live) => {
-                self.state.prefix_code = live.prefix.0;
-                self.state.prefix_mods = live.prefix.1;
-                self.state.keybinds = live.keybinds;
-                self.state.config_diagnostic = None;
-                self.config_diagnostic_deadline = None;
+        let report = match crate::config::load_live_config() {
+            Ok(loaded) => self.apply_live_config(
+                &loaded.config,
+                &loaded.diagnostics,
+                &loaded.invalid_sections,
+                notify_success,
+            ),
+            Err(diagnostics) => {
+                self.state.toast = None;
+                self.state.config_diagnostic =
+                    crate::config::config_diagnostic_summary(&diagnostics);
+                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+                crate::config::ConfigReloadReport {
+                    status: crate::config::ConfigReloadStatus::Failed,
+                    diagnostics,
+                }
+            }
+        };
+        self.sync_toast_deadline(previous_toast);
+        report
+    }
+
+    fn apply_live_config(
+        &mut self,
+        config: &crate::config::Config,
+        load_diagnostics: &[String],
+        invalid_sections: &[String],
+        notify_success: bool,
+    ) -> crate::config::ConfigReloadReport {
+        let mut diagnostics = load_diagnostics.to_vec();
+        let invalid_section =
+            |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
+
+        if !invalid_section("keys") {
+            match config.live_keybinds() {
+                Ok(live) => {
+                    self.state.prefix_code = live.prefix.0;
+                    self.state.prefix_mods = live.prefix.1;
+                    self.state.keybinds = live.keybinds;
+                }
+                Err(keybind_diagnostics) => {
+                    let mut message = keybind_diagnostics.join("; ");
+                    if !message.contains("keeping current keybinds") {
+                        message.push_str("; keeping current keybinds");
+                    }
+                    diagnostics.push(message);
+                }
+            }
+        }
+
+        if !invalid_section("ui") {
+            diagnostics.extend(config.ui.sound.diagnostics());
+
+            self.state.default_sidebar_width = config.ui.sidebar_width;
+            if self.state.sidebar_width_source == state::SidebarWidthSource::ConfigDefault {
+                self.state.sidebar_width = config.ui.sidebar_width;
+            }
+            self.state.confirm_close = config.ui.confirm_close;
+            self.state.accent = crate::config::parse_color(&config.ui.accent);
+            if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
+                self.state.request_client_sound_config_reload = true;
+            }
+            self.state.sound = config.ui.sound.clone();
+            self.state.toast_config = config.ui.toast.clone();
+        }
+
+        if !invalid_section("advanced") {
+            self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("theme") {
+            self.state.palette = resolve_palette_with_legacy_accent(config, !invalid_section("ui"));
+            self.state.theme_name = config
+                .theme
+                .name
+                .clone()
+                .unwrap_or_else(|| "catppuccin".to_string());
+        }
+
+        let status = if diagnostics.is_empty() {
+            crate::config::ConfigReloadStatus::Applied
+        } else {
+            crate::config::ConfigReloadStatus::Partial
+        };
+
+        if diagnostics.is_empty() {
+            self.state.config_diagnostic = None;
+            self.config_diagnostic_deadline = None;
+            if notify_success {
                 self.state.toast = Some(crate::app::state::ToastNotification {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
-                    title: "reloaded keybinds".to_string(),
+                    title: "reloaded config".to_string(),
                     context: "using config.toml".to_string(),
                 });
             }
-            Err(diagnostics) => {
-                let mut message = diagnostics.join("; ");
-                if !message.contains("keeping current keybinds") {
-                    message.push_str("; keeping current keybinds");
-                }
-                self.state.toast = None;
-                self.state.config_diagnostic = Some(message);
-                self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+        } else {
+            self.state.config_diagnostic = crate::config::config_diagnostic_summary(&diagnostics);
+            self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(8));
+            if notify_success {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::UpdateInstalled,
+                    title: "reloaded config".to_string(),
+                    context: "with warnings".to_string(),
+                });
             }
         }
-        self.sync_toast_deadline(previous_toast);
+
+        crate::config::ConfigReloadReport {
+            status,
+            diagnostics,
+        }
     }
 }
 
@@ -660,6 +764,8 @@ impl App {
                         }
                     }
                 }
+                crate::raw_input::RawInputEvent::OuterFocusGained
+                | crate::raw_input::RawInputEvent::OuterFocusLost => {}
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
@@ -678,7 +784,7 @@ impl App {
         let key_event = key.as_key_event();
         match self.state.mode {
             Mode::Navigate => {
-                input::handle_navigate_key(&mut self.state, key_event);
+                self.handle_navigate_key(key);
             }
             Mode::RenameWorkspace | Mode::RenameTab => {
                 input::handle_rename_key(&mut self.state, key_event);
@@ -817,30 +923,35 @@ mod tests {
     }
 
     #[test]
-    fn reload_keybinds_updates_live_state() {
+    fn reload_config_updates_live_state() {
         let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("reload-keybinds-success");
+        let path = temp_config_path("reload-config-success");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n",
+            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
-        app.reload_keybinds();
+        let report = app.reload_config();
 
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
         assert_eq!(app.state.prefix_mods, KeyModifiers::CONTROL);
         assert_eq!(
             app.state.keybinds.new_workspace,
             (KeyCode::Char('g'), KeyModifiers::empty())
         );
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Herdr
+        );
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
         assert_eq!(toast.kind, crate::app::state::ToastKind::UpdateInstalled);
-        assert_eq!(toast.title, "reloaded keybinds");
+        assert_eq!(toast.title, "reloaded config");
         assert_eq!(toast.context, "using config.toml");
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
@@ -848,23 +959,63 @@ mod tests {
     }
 
     #[test]
-    fn reload_keybinds_keeps_current_state_on_invalid_binding() {
+    fn reload_config_updates_sidebar_width_only_when_config_owned() {
         let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("reload-keybinds-invalid");
+        let path = temp_config_path("reload-config-sidebar-width");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[keys]\nnew_workspace = \"wat\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_width_source,
+            state::SidebarWidthSource::ConfigDefault
+        );
+
+        std::fs::write(&path, "[ui]\nsidebar_width = 42\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.default_sidebar_width, 42);
+        assert_eq!(app.state.sidebar_width, 42);
+
+        app.state.sidebar_width = 31;
+        app.state.sidebar_width_source = state::SidebarWidthSource::Manual;
+        std::fs::write(&path, "[ui]\nsidebar_width = 44\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.default_sidebar_width, 44);
+        assert_eq!(app.state.sidebar_width, 31);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_keeps_current_keybinds_on_invalid_binding_but_applies_other_sections() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-invalid-keybind");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[keys]\nnew_workspace = \"wat\"\n[ui.toast]\ndelivery = \"terminal\"\n",
+        )
+        .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = test_app();
         let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
         let original_keybinds = app.state.keybinds.new_workspace;
-        app.reload_keybinds();
+        let report = app.reload_config();
 
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(
             (app.state.prefix_code, app.state.prefix_mods),
             original_prefix
         );
         assert_eq!(app.state.keybinds.new_workspace, original_keybinds);
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
         assert!(app
             .state
             .config_diagnostic
@@ -872,6 +1023,102 @@ mod tests {
             .is_some_and(|message| {
                 message.contains("keys.new_workspace")
                     && message.contains("keeping current keybinds")
+            }));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_preserves_invalid_ui_section_but_applies_valid_keys() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-invalid-ui-section");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[keys]\nnew_workspace = \"g\"\n[ui.toast]\ndelivery = \"desktop\"\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            app.state.keybinds.new_workspace,
+            (KeyCode::Char('g'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Herdr
+        );
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("invalid ui config")));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settings_save_toast_delivery_persists_then_applies_live_config() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-save-toast-delivery");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Off
+        );
+
+        app.save_toast_delivery(crate::config::ToastDelivery::Terminal);
+
+        assert_eq!(
+            app.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("delivery = \"terminal\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_keeps_current_state_on_invalid_toml() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-invalid-toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[keys\nnew_workspace = \"g\"\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let original_prefix = (app.state.prefix_code, app.state.prefix_mods);
+        let original_keybinds = app.state.keybinds.new_workspace;
+        let original_toast_delivery = app.state.toast_config.delivery;
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Failed);
+        assert_eq!(
+            (app.state.prefix_code, app.state.prefix_mods),
+            original_prefix
+        );
+        assert_eq!(app.state.keybinds.new_workspace, original_keybinds);
+        assert_eq!(app.state.toast_config.delivery, original_toast_delivery);
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| {
+                message.contains("config parse error") && message.contains("keeping current config")
             }));
         assert!(app.state.toast.is_none());
 
@@ -1339,6 +1586,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_client_input_double_prefix_passes_prefix_through_to_focused_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prefix_code = KeyCode::Char('l');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![0x0c]));
+    }
+
+    #[tokio::test]
     async fn route_client_input_reencodes_terminal_keys_for_focused_pane_protocol() {
         let mut app = test_app();
         let mut workspace = Workspace::test_new("test");
@@ -1395,12 +1664,10 @@ mod tests {
     fn route_client_input_advances_onboarding_modal() {
         let mut app = test_app();
         app.state.mode = Mode::Onboarding;
-        app.state.onboarding_step = 0;
 
         app.route_client_input(b"\r".to_vec());
 
-        assert_eq!(app.state.onboarding_step, 1);
-        assert_eq!(app.state.mode, Mode::Onboarding);
+        assert_eq!(app.state.mode, Mode::Settings);
     }
 
     #[test]

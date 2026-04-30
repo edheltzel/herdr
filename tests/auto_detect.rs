@@ -222,6 +222,25 @@ fn ping_socket(socket_path: &Path) -> String {
     response.trim().to_string()
 }
 
+fn wait_for_log_contains(path: &Path, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(content) = fs::read_to_string(path) {
+            if content.contains(needle) {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let content = fs::read_to_string(path).unwrap_or_default();
+    panic!(
+        "log {} did not contain {:?}. content:\n{}",
+        path.display(),
+        needle,
+        content
+    );
+}
+
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
@@ -636,6 +655,77 @@ fn auto_detect_default_socket_path_from_config_dir() {
     );
 
     cleanup_spawned_herdr(server, base);
+}
+
+#[test]
+fn auto_detect_writes_client_and_server_logs_to_separate_files() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_herdr_auto(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let app_dir_name = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
+    let log_dir = config_home.join(app_dir_name);
+    let client_log = log_dir.join("herdr-client.log");
+    let server_log = log_dir.join("herdr-server.log");
+    let monolith_log = log_dir.join("herdr.log");
+
+    wait_for_log_contains(
+        &client_log,
+        "event=\"app.startup\" subsystem=\"client\"",
+        Duration::from_secs(10),
+    );
+    wait_for_log_contains(
+        &server_log,
+        "event=\"app.startup\" subsystem=\"server\"",
+        Duration::from_secs(10),
+    );
+
+    let monolith_content = fs::read_to_string(&monolith_log).unwrap_or_default();
+    assert!(
+        !monolith_content.contains("subsystem=\"client\""),
+        "persistent client logs should not land in herdr.log: {monolith_content}"
+    );
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn no_session_writes_startup_logs_to_monolith_file() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_herdr_no_session(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let app_dir_name = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
+    let log_dir = config_home.join(app_dir_name);
+    let monolith_log = log_dir.join("herdr.log");
+
+    wait_for_log_contains(
+        &monolith_log,
+        "event=\"app.startup\" subsystem=\"app\"",
+        Duration::from_secs(10),
+    );
+
+    cleanup_spawned_herdr(spawned, base);
 }
 
 #[test]

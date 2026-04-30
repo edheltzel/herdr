@@ -1,11 +1,33 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{CommandKeybindConfig, SoundConfig, ThemeConfig, DEFAULT_SCROLLBACK_LIMIT_BYTES};
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToastDelivery {
+    #[default]
+    Off,
+    Herdr,
+    Terminal,
+}
+
+#[derive(Debug, Clone)]
 pub struct ToastConfig {
-    pub enabled: bool,
+    pub delivery: ToastDelivery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigReloadStatus {
+    Applied,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ConfigReloadReport {
+    pub status: ConfigReloadStatus,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -22,6 +44,7 @@ pub struct Config {
 pub struct LoadedConfig {
     pub config: Config,
     pub diagnostics: Vec<String>,
+    pub invalid_sections: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +60,8 @@ pub struct KeysConfig {
     pub close_workspace: String,
     /// Optional explicit detach shortcut in server/client mode. Unset by default.
     pub detach: String,
+    /// Reload config.toml in the running app/server. Unset by default.
+    pub reload_config: String,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: String,
     /// Select the next workspace. Unset by default.
@@ -108,6 +133,7 @@ impl Default for KeysConfig {
             rename_workspace: "shift+n".into(),
             close_workspace: "shift+d".into(),
             detach: "".into(),
+            reload_config: "".into(),
             previous_workspace: "".into(),
             next_workspace: "".into(),
             new_tab: "c".into(),
@@ -144,7 +170,31 @@ impl Default for UiConfig {
 
 impl Default for ToastConfig {
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            delivery: ToastDelivery::Off,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToastConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct RawToastConfig {
+            delivery: Option<ToastDelivery>,
+            enabled: Option<bool>,
+        }
+
+        let raw = RawToastConfig::deserialize(deserializer)?;
+        let delivery = raw.delivery.unwrap_or_else(|| match raw.enabled {
+            Some(true) => ToastDelivery::Herdr,
+            Some(false) => ToastDelivery::Off,
+            None => ToastDelivery::Off,
+        });
+        Ok(Self { delivery })
     }
 }
 
@@ -165,10 +215,41 @@ mod tests {
     fn toast_config_parses() {
         let toml = r#"
 [ui.toast]
+delivery = "terminal"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
+    }
+
+    #[test]
+    fn toast_config_legacy_enabled_true_maps_to_herdr() {
+        let toml = r#"
+[ui.toast]
 enabled = true
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert!(config.ui.toast.enabled);
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Herdr);
+    }
+
+    #[test]
+    fn toast_config_legacy_enabled_false_maps_to_off() {
+        let toml = r#"
+[ui.toast]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Off);
+    }
+
+    #[test]
+    fn toast_config_delivery_wins_over_legacy_enabled() {
+        let toml = r#"
+[ui.toast]
+enabled = true
+delivery = "terminal"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.delivery, ToastDelivery::Terminal);
     }
 
     #[test]

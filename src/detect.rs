@@ -284,7 +284,7 @@ fn detect_cline(content: &str) -> AgentState {
 
 fn detect_opencode(content: &str) -> AgentState {
     // Blocked
-    if content.contains("△ Permission required") {
+    if content.contains("△ Permission required") || has_opencode_question_prompt(content) {
         return AgentState::Blocked;
     }
 
@@ -545,6 +545,16 @@ fn has_cursor_spinner(content: &str) -> bool {
         }
     }
     false
+}
+
+fn has_opencode_question_prompt(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let has_enter_action = lower.contains("enter confirm")
+        || lower.contains("enter submit")
+        || lower.contains("enter toggle");
+    let has_question_nav = content.contains("↑↓ select") || content.contains("⇆ tab");
+
+    lower.contains("esc dismiss") && has_enter_action && has_question_nav
 }
 
 /// Extract content above Claude's prompt box.
@@ -1031,6 +1041,28 @@ mod tests {
         assert_eq!(
             detect_opencode("running tool\nesc to interrupt"),
             AgentState::Working
+        );
+    }
+
+    #[test]
+    fn opencode_waiting_question_prompt() {
+        assert_eq!(
+            detect_opencode(
+                "Goal   Detail   Confirm\n\
+                 What do you want help with right now?\n\
+                 1. Code change\n\
+                 5. Type your own answer\n\
+                 ⇆ tab  ↑↓ select  enter confirm  esc dismiss",
+            ),
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn opencode_waiting_question_confirm_tab() {
+        assert_eq!(
+            detect_opencode("Goal   Detail   Confirm\nReview\n⇆ tab  enter submit  esc dismiss"),
+            AgentState::Blocked
         );
     }
 

@@ -89,6 +89,12 @@ impl App {
             ws.switch_tab(idx);
             self.state.mode = Mode::Terminal;
         }
+        let workspace_id = self.state.workspaces[ws_idx].id.clone();
+        let tab_id = self
+            .public_tab_id(ws_idx, idx)
+            .unwrap_or_else(|| format!("{}:{}", workspace_id, idx + 1));
+        let root_pane = self.state.workspaces[ws_idx].tabs[idx].root_pane.raw();
+        crate::logging::tab_created(&workspace_id, &tab_id, root_pane);
         self.schedule_session_save();
         Ok(idx)
     }
@@ -112,6 +118,9 @@ impl App {
         ws.refresh_git_ahead_behind();
         self.state.workspaces.push(ws);
         let idx = self.state.workspaces.len() - 1;
+        let workspace_id = self.state.workspaces[idx].id.clone();
+        let root_pane = self.state.workspaces[idx].tabs[0].root_pane.raw();
+        crate::logging::workspace_created(&workspace_id, root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
             self.state.mode = Mode::Terminal;

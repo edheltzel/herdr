@@ -1,5 +1,9 @@
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 use std::thread;
@@ -64,6 +68,269 @@ pub fn cleanup_test_base(base: &Path) {
     terminate_servers_for_runtime_dirs(&runtime_dirs);
     unregister_runtime_dir(&runtime_dir);
     let _ = fs::remove_dir_all(base);
+}
+
+pub fn wait_for_socket(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() && UnixStream::connect(path).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("socket did not appear at {}", path.display());
+}
+
+pub fn wait_for_file(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("file did not appear at {}", path.display());
+}
+
+pub fn encode_varint_u32(v: u32) -> Vec<u8> {
+    if v < 251 {
+        vec![v as u8]
+    } else if v < 65536 {
+        let mut buf = vec![251u8];
+        buf.extend_from_slice(&(v as u16).to_le_bytes());
+        buf
+    } else {
+        let mut buf = vec![252u8];
+        buf.extend_from_slice(&v.to_le_bytes());
+        buf
+    }
+}
+
+pub fn encode_varint_u16(v: u16) -> Vec<u8> {
+    if v < 251 {
+        vec![v as u8]
+    } else {
+        let mut buf = vec![251u8];
+        buf.extend_from_slice(&v.to_le_bytes());
+        buf
+    }
+}
+
+pub fn frame_message(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len() as u32;
+    let mut framed = len.to_le_bytes().to_vec();
+    framed.extend_from_slice(payload);
+    framed
+}
+
+pub fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), String> {
+    if offset >= payload.len() {
+        return Err("payload too short for varint".into());
+    }
+    let first_byte = payload[offset];
+    match first_byte {
+        0..=250 => Ok((first_byte as u32, 1)),
+        251 => {
+            if offset + 3 > payload.len() {
+                return Err("payload too short for u16 varint".into());
+            }
+            let v = u16::from_le_bytes(
+                payload[offset + 1..offset + 3]
+                    .try_into()
+                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
+            );
+            Ok((v as u32, 3))
+        }
+        252 => {
+            if offset + 5 > payload.len() {
+                return Err("payload too short for u32 varint".into());
+            }
+            let v = u32::from_le_bytes(
+                payload[offset + 1..offset + 5]
+                    .try_into()
+                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
+            );
+            Ok((v, 5))
+        }
+        _ => Err(format!("unsupported varint tag: {first_byte}")),
+    }
+}
+
+fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {
+    let mut buf = encode_varint_u32(variant_idx);
+    for field in fields {
+        buf.extend_from_slice(field);
+    }
+    buf
+}
+
+fn decode_welcome(payload: &[u8]) -> Result<(u32, Option<String>), String> {
+    let mut offset = 0;
+    let (variant, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed;
+    if variant != 0 {
+        return Err(format!(
+            "expected Welcome (variant 0), got variant {variant}"
+        ));
+    }
+
+    let (version, consumed) = decode_varint_u32(payload, offset)?;
+    offset += consumed;
+
+    if offset >= payload.len() {
+        return Err("payload too short for Option tag".into());
+    }
+    let option_tag = payload[offset];
+    offset += 1;
+
+    let error = if option_tag == 1 {
+        let (str_len, consumed) = decode_varint_u32(payload, offset)?;
+        offset += consumed;
+        let str_len = str_len as usize;
+        if offset + str_len > payload.len() {
+            return Err("payload too short for string content".into());
+        }
+        Some(
+            String::from_utf8(payload[offset..offset + str_len].to_vec())
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    Ok((version, error))
+}
+
+pub fn client_handshake(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(u32, Option<String>), String> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+
+    let hello_payload = encode_varint_enum(
+        0,
+        &[
+            &encode_varint_u32(version),
+            &encode_varint_u16(cols),
+            &encode_varint_u16(rows),
+        ],
+    );
+    let framed = frame_message(&hello_payload);
+    stream.write_all(&framed).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > 2 * 1024 * 1024 {
+        return Err(format!("oversized response: {len}"));
+    }
+
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
+    decode_welcome(&payload)
+}
+
+pub fn read_server_message(stream: &mut UnixStream) -> Result<(u32, Vec<u8>), String> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|e| format!("read length prefix: {e}"))?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > 2 * 1024 * 1024 {
+        return Err(format!("oversized frame: {len} bytes"));
+    }
+    if len == 0 {
+        return Err("zero-length frame".into());
+    }
+
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|e| format!("read payload: {e}"))?;
+
+    let (variant, consumed) = decode_varint_u32(&payload, 0)?;
+    Ok((variant, payload[consumed..].to_vec()))
+}
+
+pub fn send_input(stream: &mut UnixStream, data: &[u8]) -> Result<(), String> {
+    let mut buf = encode_varint_u32(1);
+    buf.extend_from_slice(&encode_varint_u32(data.len() as u32));
+    buf.extend_from_slice(data);
+    let framed = frame_message(&buf);
+    stream
+        .write_all(&framed)
+        .map_err(|e| format!("write input: {e}"))?;
+    stream.flush().map_err(|e| format!("flush input: {e}"))?;
+    Ok(())
+}
+
+pub fn send_detach(stream: &mut UnixStream) -> Result<(), String> {
+    let detach_payload = encode_varint_u32(3);
+    let framed = frame_message(&detach_payload);
+    stream
+        .write_all(&framed)
+        .map_err(|e| format!("write detach: {e}"))?;
+    stream.flush().map_err(|e| format!("flush detach: {e}"))?;
+    Ok(())
+}
+
+pub fn drain_messages(stream: &mut UnixStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    while let Ok(_) = read_server_message(stream) {}
+    stream.set_read_timeout(None).unwrap();
+}
+
+pub fn wait_until<F>(timeout: Duration, interval: Duration, mut predicate: F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        thread::sleep(interval);
+    }
+    predicate()
+}
+
+pub fn wait_for_message_variant(
+    stream: &mut UnixStream,
+    timeout: Duration,
+    variant: u32,
+) -> Result<bool, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match read_server_message(stream) {
+            Ok((got, _)) if got == variant => return Ok(true),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+    Ok(false)
+}
+
+pub fn wait_for_disconnect(stream: &mut UnixStream, timeout: Duration) -> Result<bool, String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if read_server_message(stream).is_err() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn cleanup_registered_herdr_pids() {
@@ -223,7 +490,7 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
             continue;
         }
 
-        if is_worktree_herdr_server_process(pid) {
+        if is_test_herdr_server_process(pid) {
             pids.push(pid);
         }
     }
@@ -231,12 +498,12 @@ fn iter_worktree_server_pids() -> std::io::Result<Vec<u32>> {
     Ok(pids)
 }
 
-fn is_worktree_herdr_server_process(pid: u32) -> bool {
+fn is_test_herdr_server_process(pid: u32) -> bool {
     let Some(exe_path) = proc_link_target(pid, "exe") else {
         return false;
     };
 
-    if !is_worktree_herdr_binary(&exe_path) {
+    if !is_test_herdr_binary(&exe_path) {
         return false;
     }
 
@@ -296,11 +563,12 @@ fn runtime_dir_owner_alive(runtime_dir: &Path) -> bool {
     process_exists(owner_pid)
 }
 
-fn is_worktree_herdr_binary(path: &Path) -> bool {
-    path.ends_with("target/debug/herdr")
-        && path
-            .components()
-            .any(|component| component.as_os_str() == "herdr-worktrees")
+fn current_checkout_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn is_test_herdr_binary(path: &Path) -> bool {
+    path.ends_with("target/debug/herdr") && path.starts_with(current_checkout_root())
 }
 
 extern "C" fn run_atexit_cleanup() {
@@ -419,6 +687,23 @@ mod tests {
         assert!(
             should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs),
             "missing runtime dirs that are session-owned should be considered killable"
+        );
+    }
+
+    #[test]
+    fn test_binary_matcher_accepts_current_checkout_debug_binary() {
+        let binary = current_checkout_root().join("target/debug/herdr");
+        assert!(
+            is_test_herdr_binary(&binary),
+            "current checkout debug binary should be considered test-owned"
+        );
+    }
+
+    #[test]
+    fn test_binary_matcher_rejects_installed_binary() {
+        assert!(
+            !is_test_herdr_binary(Path::new("/home/can/.local/bin/herdr")),
+            "installed binaries must not be considered test-owned"
         );
     }
 }

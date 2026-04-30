@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## [0.5.3] - 2026-04-30
+
+### Added
+- Added named persistent sessions, so you can keep separate herdr environments for different projects or contexts while sharing the same global config. See the docs for the full session CLI. (#57, thanks @fbettag)
+- Added `herdr status`, `herdr status server`, and `herdr status client` to inspect the local client, running server, protocol compatibility, socket path, and whether a restart is needed.
+
+### Changed
+- Focused panes can now still alert you through terminal notifications when the herdr terminal window is unfocused, so active work does not go quiet just because you switched to another app.
+
+### Fixed
+- Dragging pane split borders now works when the app inside the pane has mouse reporting enabled, including Claude Code no-flicker mode. (#61, thanks @EYH0602)
+- Pressing the prefix key twice now forwards a literal prefix key into the focused pane in client mode again.
+- `herdr integration install` and `herdr integration uninstall` now work without requiring a running herdr server.
+- Pane PTYs now keep their last attached size while detached, preventing detached output from being resized or rewrapped to fallback dimensions.
+
+## [0.5.2] - 2026-04-27
+
+### Added
+- Config can now be reloaded in the running app/server from the global menu or with `herdr server reload-config`, applying safe live settings without restarting the persistent server.
+
+### Fixed
+- Persistent server startup now surfaces config diagnostics in attached clients instead of silently hiding parse or validation errors.
+- Pane backgrounds now stay transparent when the host terminal background color is unknown, while explicit terminal cell backgrounds still render correctly.
+- Persistent-session toast and sound notifications now target the foreground attached client instead of firing across every connected client.
+- Claude Code subagent hook events no longer make the parent Claude pane look idle or released when a subagent finishes, and permissioned tool-call completion keeps the pane in the correct working state.
+
+## [0.5.1] - 2026-04-25
+
+### Added
+- Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = "terminal"`; see `CONFIGURATION.md` for details.
+- Herdr now writes separate capped support logs for app, client, and server modes, making persistent-session issue reports easier to diagnose without unbounded log growth.
+- The bundled opencode plugin now reports question prompts as blocked while waiting for user input, then returns to working or idle when answered or dismissed. Question prompts are also detected by the default terminal-screen heuristics. (#51, thanks @mspiegel31)
+
+### Changed
+- Routine API request traces now log at debug level by default, making normal support logs smaller and easier to read while preserving detailed traces when debug logging is enabled.
+
+### Fixed
+- Pasted text and other reverse-video terminal content now stays readable when pane backgrounds are transparent. (#45, thanks @EYH0602)
+- Panes now advertise a stable `TERM=xterm-256color` and `COLORTERM=truecolor` by default, improving redraw and cursor behavior in shells and remote sessions.
+- Pane scrollbars once again reserve their own rightmost column instead of overlaying terminal content in persistent session mode.
+- Terminal-delivered toast notifications now use the server-approved delivery decision in persistent session mode, so attaching clients do not incorrectly suppress them.
+- In-app toast delivery now stays inside herdr instead of also forwarding a terminal/desktop notification.
+
 ## [0.5.0] - 2026-04-21
 
 ### Breaking Changes Please Read

@@ -30,7 +30,8 @@ const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn request_changes_ui(request: &Request) -> bool {
     matches!(
         &request.method,
-        Method::WorkspaceCreate(_)
+        Method::ServerReloadConfig(_)
+            | Method::WorkspaceCreate(_)
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
             | Method::WorkspaceClose(_)
@@ -94,11 +95,7 @@ impl EventHub {
 }
 
 pub fn socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var(SOCKET_PATH_ENV_VAR) {
-        return PathBuf::from(path);
-    }
-
-    crate::config::config_dir().join("herdr.sock")
+    crate::session::active_api_socket_path()
 }
 
 pub struct ServerHandle {
@@ -218,26 +215,81 @@ fn handle_connection(
         }
     };
 
+    let request_id = request.id.clone();
+    let method = api_method_name(&request.method);
+    let changes_ui = request_changes_ui(&request);
+    crate::logging::api_request_started(&request_id, method, changes_ui);
+
     match request.method {
         Method::EventsSubscribe(params) => {
-            stream_subscriptions(stream, request.id, params, api_tx, event_hub, running)
+            let result = stream_subscriptions(
+                stream,
+                request_id.clone(),
+                params,
+                api_tx,
+                event_hub,
+                running,
+            );
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "stream_closed",
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
         Method::PaneWaitForOutput(params) => {
-            let Some(response) = wait_for_output(request.id, params, &mut stream, api_tx, running)?
+            let Some(response) =
+                wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?
             else {
+                crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    "client_disconnected",
+                    changes_ui,
+                );
                 return Ok(());
             };
-            write_text_line_allow_disconnect(&mut stream, &response)
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
-        method => {
+        method_body => {
             let response = handle_request(
                 Request {
-                    id: request.id,
-                    method,
+                    id: request_id.clone(),
+                    method: method_body,
                 },
                 api_tx,
             );
-            write_text_line_allow_disconnect(&mut stream, &response)
+            let result = write_text_line_allow_disconnect(&mut stream, &response);
+            match &result {
+                Ok(()) => crate::logging::api_request_completed(
+                    &request_id,
+                    method,
+                    api_response_outcome(&response),
+                    changes_ui,
+                ),
+                Err(err) => {
+                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
+                }
+            }
+            result
         }
     }
 }
@@ -248,6 +300,7 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
             id: request.id,
             result: ResponseResult::Pong {
                 version: env!("CARGO_PKG_VERSION").into(),
+                protocol: crate::server::protocol::PROTOCOL_VERSION,
             },
         })
         .unwrap_or_else(|_| {
@@ -255,6 +308,58 @@ fn handle_request(request: Request, api_tx: &ApiRequestSender) -> String {
                 .to_string()
         }),
         _ => dispatch_to_app(request, api_tx),
+    }
+}
+
+fn api_method_name(method: &Method) -> &'static str {
+    match method {
+        Method::Ping(_) => "ping",
+        Method::ServerStop(_) => "server.stop",
+        Method::ServerReloadConfig(_) => "server.reload_config",
+        Method::WorkspaceCreate(_) => "workspace.create",
+        Method::WorkspaceList(_) => "workspace.list",
+        Method::WorkspaceGet(_) => "workspace.get",
+        Method::WorkspaceFocus(_) => "workspace.focus",
+        Method::WorkspaceRename(_) => "workspace.rename",
+        Method::WorkspaceClose(_) => "workspace.close",
+        Method::TabCreate(_) => "tab.create",
+        Method::TabList(_) => "tab.list",
+        Method::TabGet(_) => "tab.get",
+        Method::TabFocus(_) => "tab.focus",
+        Method::TabRename(_) => "tab.rename",
+        Method::TabClose(_) => "tab.close",
+        Method::PaneSplit(_) => "pane.split",
+        Method::PaneList(_) => "pane.list",
+        Method::PaneGet(_) => "pane.get",
+        Method::PaneSendText(_) => "pane.send_text",
+        Method::PaneSendKeys(_) => "pane.send_keys",
+        Method::PaneSendInput(_) => "pane.send_input",
+        Method::PaneRead(_) => "pane.read",
+        Method::PaneReportAgent(_) => "pane.report_agent",
+        Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
+        Method::PaneReleaseAgent(_) => "pane.release_agent",
+        Method::PaneClose(_) => "pane.close",
+        Method::EventsSubscribe(_) => "events.subscribe",
+        Method::EventsWait(_) => "events.wait",
+        Method::PaneWaitForOutput(_) => "pane.wait_for_output",
+        Method::IntegrationInstall(_) => "integration.install",
+        Method::IntegrationUninstall(_) => "integration.uninstall",
+    }
+}
+
+fn api_response_outcome(response: &str) -> &'static str {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return "error";
+    };
+
+    match value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(|code| code.as_str())
+    {
+        Some("timeout") => "timeout",
+        Some(_) => "error",
+        None => "ok",
     }
 }
 
@@ -274,6 +379,7 @@ fn wait_for_output(
     api_tx: &ApiRequestSender,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<Option<String>> {
+    crate::logging::api_wait_started(&request_id, &params.pane_id, params.timeout_ms);
     let deadline = params
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
@@ -299,6 +405,7 @@ fn wait_for_output(
 
     loop {
         if should_stop_connection(stream, running)? {
+            crate::logging::api_wait_completed(&request_id, &params.pane_id, "client_disconnected");
             return Ok(None);
         }
 
@@ -340,6 +447,7 @@ fn wait_for_output(
         let matched_line = match_output(&read.text, &params.r#match, regex.as_ref());
         if matched_line.is_some() {
             let revision = read.revision;
+            crate::logging::api_wait_completed(&request_id, &params.pane_id, "matched");
             return Ok(Some(
                 serde_json::to_string(&SuccessResponse {
                     id: request_id,
@@ -355,6 +463,7 @@ fn wait_for_output(
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            crate::logging::api_wait_timed_out(&request_id, &params.pane_id);
             return Ok(Some(
                 serde_json::to_string(&ErrorResponse {
                     id: request_id,
@@ -951,6 +1060,8 @@ mod tests {
     fn socket_path_prefers_explicit_env_override() {
         let _guard = env_lock().lock().unwrap();
         let unique = format!("/tmp/herdr-test-{}.sock", std::process::id());
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         std::env::set_var(SOCKET_PATH_ENV_VAR, &unique);
         assert_eq!(socket_path(), PathBuf::from(&unique));
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
@@ -962,6 +1073,8 @@ mod tests {
         let config_home = unique_test_path("socket-default-config-home");
         let runtime_dir = unique_test_path("socket-default-runtime");
         std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
 
@@ -972,6 +1085,26 @@ mod tests {
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+
+    #[test]
+    fn socket_path_uses_named_session_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let config_home = unique_test_path("socket-named-config-home");
+        std::env::remove_var(SOCKET_PATH_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+        std::env::set_var(crate::session::SESSION_ENV_VAR, "work");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let expected = config_home
+            .join(crate::config::app_dir_name())
+            .join("sessions")
+            .join("work")
+            .join("herdr.sock");
+        assert_eq!(socket_path(), expected);
+
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -989,6 +1122,19 @@ mod tests {
         drop(_listener);
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_response_outcome_uses_top_level_error_shape() {
+        let ok_with_error_text = r#"{"id":"req","result":{"read":{"text":"user said \"error\": \"timeout\"","revision":1}}}"#;
+        assert_eq!(api_response_outcome(ok_with_error_text), "ok");
+
+        let timeout = r#"{"id":"req","error":{"code":"timeout","message":"timed out waiting for output match"}}"#;
+        assert_eq!(api_response_outcome(timeout), "timeout");
+
+        let generic_error =
+            r#"{"id":"req","error":{"code":"server_unavailable","message":"boom"}}"#;
+        assert_eq!(api_response_outcome(generic_error), "error");
     }
 
     #[test]

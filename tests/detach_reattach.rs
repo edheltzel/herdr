@@ -4,7 +4,7 @@
 mod support;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -14,8 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    cleanup_test_base, client_handshake, drain_messages, read_server_message, register_runtime_dir,
+    register_spawned_herdr_pid, send_detach, send_input, unregister_spawned_herdr_pid,
+    wait_for_disconnect, wait_for_file, wait_for_message_variant, wait_for_socket, wait_until,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -66,28 +67,6 @@ fn test_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn wait_for_socket(path: &PathBuf, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
-}
-
-fn wait_for_file(path: &PathBuf, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("file did not appear at {}", path.display());
 }
 
 fn spawn_server(
@@ -189,6 +168,66 @@ fn pane_read_recent(socket_path: &PathBuf, pane_id: &str) -> Value {
     )
 }
 
+fn pane_read_recent_text(socket_path: &PathBuf, pane_id: &str) -> String {
+    pane_read_recent(socket_path, pane_id)["result"]["read"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn pane_send_text(socket_path: &PathBuf, pane_id: &str, text: &str) -> Value {
+    send_json_request(
+        socket_path,
+        &format!(
+            r#"{{"id":"pane_send_text","method":"pane.send_text","params":{{"pane_id":"{pane_id}","text":{}}}}}"#,
+            serde_json::to_string(text).unwrap()
+        ),
+    )
+}
+
+fn parse_size_after_marker(text: &str, marker: &str) -> Option<(u16, u16)> {
+    let lines: Vec<&str> = text.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if !line.contains(marker) {
+            continue;
+        }
+        for candidate in lines.iter().skip(idx + 1).take(6) {
+            let mut parts = candidate.split_whitespace();
+            let Some(rows) = parts.next().and_then(|part| part.parse::<u16>().ok()) else {
+                continue;
+            };
+            let Some(cols) = parts.next().and_then(|part| part.parse::<u16>().ok()) else {
+                continue;
+            };
+            if parts.next().is_none() {
+                return Some((rows, cols));
+            }
+        }
+    }
+    None
+}
+
+fn read_pane_tty_size_after_marker(
+    socket_path: &PathBuf,
+    pane_id: &str,
+    marker: &str,
+    timeout: Duration,
+) -> (u16, u16) {
+    pane_send_text(socket_path, pane_id, &format!("echo {marker}; stty size\n"));
+
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    while Instant::now() < deadline {
+        last_text = pane_read_recent_text(socket_path, pane_id);
+        if let Some(size) = parse_size_after_marker(&last_text, marker) {
+            return size;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("did not observe tty size after marker {marker}. pane output:\n{last_text}");
+}
+
 fn workspace_id_by_label(response: &Value, label: &str) -> String {
     response["result"]["workspaces"]
         .as_array()
@@ -208,228 +247,6 @@ fn first_pane_id(response: &Value) -> String {
         .and_then(|pane| pane["pane_id"].as_str())
         .expect("pane.list should contain at least one pane")
         .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Bincode v2 varint encoding helpers
-// ---------------------------------------------------------------------------
-
-/// Encode a varint u32 value according to bincode v2 VarintEncoding.
-fn encode_varint_u32(v: u32) -> Vec<u8> {
-    if v < 251 {
-        vec![v as u8]
-    } else if v < 65536 {
-        let mut buf = vec![251u8];
-        buf.extend_from_slice(&(v as u16).to_le_bytes());
-        buf
-    } else {
-        let mut buf = vec![252u8];
-        buf.extend_from_slice(&v.to_le_bytes());
-        buf
-    }
-}
-
-/// Encode a varint u16 value.
-fn encode_varint_u16(v: u16) -> Vec<u8> {
-    if v < 251 {
-        vec![v as u8]
-    } else {
-        let mut buf = vec![251u8];
-        buf.extend_from_slice(&v.to_le_bytes());
-        buf
-    }
-}
-
-/// Encode an enum variant with its fields.
-fn encode_varint_enum(variant_idx: u32, fields: &[&[u8]]) -> Vec<u8> {
-    let mut buf = encode_varint_u32(variant_idx);
-    for field in fields {
-        buf.extend_from_slice(field);
-    }
-    buf
-}
-
-/// Frame a message with u32LE length prefix.
-fn frame_message(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len() as u32;
-    let mut framed = len.to_le_bytes().to_vec();
-    framed.extend_from_slice(payload);
-    framed
-}
-
-/// Decode a varint u32 from a byte slice at the given offset.
-fn decode_varint_u32(payload: &[u8], offset: usize) -> Result<(u32, usize), String> {
-    if offset >= payload.len() {
-        return Err("payload too short for varint".into());
-    }
-    let first_byte = payload[offset];
-    match first_byte {
-        0..=250 => Ok((first_byte as u32, 1)),
-        251 => {
-            if offset + 3 > payload.len() {
-                return Err("payload too short for u16 varint".into());
-            }
-            let v = u16::from_le_bytes(
-                payload[offset + 1..offset + 3]
-                    .try_into()
-                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
-            );
-            Ok((v as u32, 3))
-        }
-        252 => {
-            if offset + 5 > payload.len() {
-                return Err("payload too short for u32 varint".into());
-            }
-            let v = u32::from_le_bytes(
-                payload[offset + 1..offset + 5]
-                    .try_into()
-                    .map_err(|e: std::array::TryFromSliceError| e.to_string())?,
-            );
-            Ok((v, 5))
-        }
-        _ => Err(format!("unsupported varint tag: {first_byte}")),
-    }
-}
-
-/// Sends a Hello message over the client socket and reads the Welcome response.
-fn client_handshake(
-    stream: &mut UnixStream,
-    version: u32,
-    cols: u16,
-    rows: u16,
-) -> Result<(u32, Option<String>), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-
-    // Encode Hello message: ClientMessage variant 0.
-    let hello_payload = encode_varint_enum(
-        0,
-        &[
-            &encode_varint_u32(version),
-            &encode_varint_u16(cols),
-            &encode_varint_u16(rows),
-        ],
-    );
-    let framed = frame_message(&hello_payload);
-    stream.write_all(&framed).map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-
-    // Read the framed response.
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    if len > 2 * 1024 * 1024 {
-        return Err(format!("oversized response: {len}"));
-    }
-
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).map_err(|e| e.to_string())?;
-
-    // Decode Welcome: ServerMessage variant 0 = Welcome { version: u32, error: Option<String> }
-    let mut offset = 0;
-
-    let (variant, consumed) = decode_varint_u32(&payload, offset)?;
-    offset += consumed;
-    if variant != 0 {
-        return Err(format!(
-            "expected Welcome (variant 0), got variant {variant}"
-        ));
-    }
-
-    let (version, consumed) = decode_varint_u32(&payload, offset)?;
-    offset += consumed;
-
-    if offset >= payload.len() {
-        return Err("payload too short for Option tag".into());
-    }
-    let option_tag = payload[offset];
-    offset += 1;
-
-    let error = if option_tag == 1 {
-        let (str_len, consumed) = decode_varint_u32(&payload, offset)?;
-        offset += consumed;
-        let str_len = str_len as usize;
-
-        if offset + str_len > payload.len() {
-            return Err("payload too short for string content".into());
-        }
-        let s = String::from_utf8(payload[offset..offset + str_len].to_vec())
-            .map_err(|e| e.to_string())?;
-        Some(s)
-    } else {
-        None
-    };
-
-    Ok((version, error))
-}
-
-/// Read a framed ServerMessage from the stream, returning the variant index
-/// and the raw payload for further decoding.
-fn read_server_message(stream: &mut UnixStream) -> Result<(u32, Vec<u8>), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| format!("read length prefix: {e}"))?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-
-    if len > 2 * 1024 * 1024 {
-        return Err(format!("oversized frame: {len} bytes"));
-    }
-    if len == 0 {
-        return Err("zero-length frame".into());
-    }
-
-    let mut payload = vec![0u8; len];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|e| format!("read payload: {e}"))?;
-
-    let (variant, consumed) = decode_varint_u32(&payload, 0)?;
-
-    Ok((variant, payload[consumed..].to_vec()))
-}
-
-/// Sends a ClientMessage::Input with the given raw bytes.
-fn send_input(stream: &mut UnixStream, data: &[u8]) -> Result<(), String> {
-    let input_payload = {
-        let mut buf = encode_varint_u32(1); // variant 1 = Input
-        buf.extend_from_slice(&encode_varint_u32(data.len() as u32));
-        buf.extend_from_slice(data);
-        buf
-    };
-    let framed = frame_message(&input_payload);
-    stream
-        .write_all(&framed)
-        .map_err(|e| format!("write input: {e}"))?;
-    stream.flush().map_err(|e| format!("flush input: {e}"))?;
-    Ok(())
-}
-
-/// Sends a ClientMessage::Detach.
-fn send_detach(stream: &mut UnixStream) -> Result<(), String> {
-    // ClientMessage::Detach is variant 3 with no fields.
-    let detach_payload = encode_varint_u32(3);
-    let framed = frame_message(&detach_payload);
-    stream
-        .write_all(&framed)
-        .map_err(|e| format!("write detach: {e}"))?;
-    stream.flush().map_err(|e| format!("flush detach: {e}"))?;
-    Ok(())
-}
-
-/// Drains all pending messages from the server stream (non-blocking).
-fn drain_messages(stream: &mut UnixStream) {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    while let Ok(_) = read_server_message(stream) {}
-    stream.set_read_timeout(None).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -459,8 +276,8 @@ fn navigate_q_detaches_client_and_server_persists() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
-        client_handshake(&mut stream, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -468,15 +285,18 @@ fn navigate_q_detaches_client_and_server_persists() {
 
     // Send prefix key (Ctrl+B = 0x02) then 'q' (quit/detach in persistence mode).
     send_input(&mut stream, &[0x02]).expect("send prefix");
-    thread::sleep(Duration::from_millis(300));
 
     // Drain any frames generated by entering navigate mode.
     drain_messages(&mut stream);
 
     send_input(&mut stream, b"q").expect("send detach key");
 
-    // Give the server time to process the detach.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should still respond to ping after client detach"
+    );
 
     // Verify server is still alive and responsive.
     let response = ping_socket(&api_socket);
@@ -488,29 +308,9 @@ fn navigate_q_detaches_client_and_server_persists() {
     // The client should receive a ServerShutdown with reason "detached"
     // shortly after the quit/detach key. There may be some frames in
     // between from the mode change, so we read multiple messages.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut got_shutdown = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        match read_server_message(&mut stream) {
-            Ok((variant, _payload)) => {
-                if variant == 2 {
-                    // ServerMessage::ServerShutdown — detach acknowledged.
-                    got_shutdown = true;
-                    break;
-                }
-                // Variant 1 = Frame — may arrive before the shutdown.
-                // Keep reading.
-            }
-            Err(_) => {
-                // Connection closed — also acceptable.
-                got_shutdown = true; // consider this a successful detach
-                break;
-            }
-        }
-    }
+    let got_shutdown = wait_for_message_variant(&mut stream, Duration::from_secs(2), 2)
+        .expect("wait for shutdown message")
+        || wait_for_disconnect(&mut stream, Duration::from_secs(1)).expect("wait for disconnect");
     assert!(
         got_shutdown,
         "client should receive ServerShutdown after quit/detach key"
@@ -538,8 +338,8 @@ fn explicit_detach_message_causes_clean_disconnect() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) =
-        client_handshake(&mut stream, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -548,8 +348,12 @@ fn explicit_detach_message_causes_clean_disconnect() {
     // Send ClientMessage::Detach directly.
     send_detach(&mut stream).expect("send detach message");
 
-    // Give the server time to process.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after client Detach message"
+    );
 
     // Verify server is still alive.
     let response = ping_socket(&api_socket);
@@ -561,25 +365,8 @@ fn explicit_detach_message_causes_clean_disconnect() {
     // The client connection should eventually be closed.
     // After sending Detach, the server removes the client.
     // We may still receive a few queued frames before the connection closes.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-
-    // Drain remaining messages until EOF or error.
-    let mut got_eof = false;
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        match read_server_message(&mut stream) {
-            Ok((variant, _)) => {
-                // May receive frames or other messages before disconnect.
-                let _ = variant;
-            }
-            Err(_) => {
-                got_eof = true;
-                break;
-            }
-        }
-    }
+    let got_eof =
+        wait_for_disconnect(&mut stream, Duration::from_secs(2)).expect("wait for disconnect");
     assert!(
         got_eof,
         "client connection should be closed after explicit Detach message"
@@ -610,8 +397,8 @@ fn reattach_after_detach_shows_current_state() {
     // --- Client A ---
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");
     let (version, error) =
-        client_handshake(&mut stream_a, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_a, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -629,14 +416,15 @@ fn reattach_after_detach_shows_current_state() {
         "workspace creation should succeed: {ws_response}"
     );
 
-    // Give the server time to process and render.
-    thread::sleep(Duration::from_millis(300));
-
     // Client A detaches (send ClientMessage::Detach).
     send_detach(&mut stream_a).expect("send detach");
 
-    // Give the server time to process the detach.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after detach"
+    );
 
     // Verify server is still alive.
     let response = ping_socket(&api_socket);
@@ -648,8 +436,8 @@ fn reattach_after_detach_shows_current_state() {
     // --- Client B (reattach) ---
     let mut stream_b = UnixStream::connect(&client_socket).expect("client B should connect");
     let (version, error) =
-        client_handshake(&mut stream_b, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_b, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(
         error.is_none(),
         "reattach handshake should succeed: {:?}",
@@ -728,8 +516,8 @@ fn processes_survive_during_and_after_detach() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) =
-        client_handshake(&mut stream, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -739,15 +527,18 @@ fn processes_survive_during_and_after_detach() {
     // pane with a shell running.
     send_input(&mut stream, b"echo SURVIVED_DETACH\n").expect("send echo command");
 
-    // Wait for the shell to process the command.
-    thread::sleep(Duration::from_millis(500));
-
     // Drain any frames generated by the input.
     drain_messages(&mut stream);
 
     // Detach the client via explicit Detach message.
     send_detach(&mut stream).expect("send detach");
-    thread::sleep(Duration::from_millis(500));
+
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after detach"
+    );
 
     // Verify server is still alive after detach.
     let response = ping_socket(&api_socket);
@@ -756,14 +547,16 @@ fn processes_survive_during_and_after_detach() {
         "server should persist after detach: {response}"
     );
 
-    // Wait a moment while detached.
-    thread::sleep(Duration::from_secs(1));
+    assert!(
+        wait_for_disconnect(&mut stream, Duration::from_secs(2)).expect("wait for detach"),
+        "detached client connection should close"
+    );
 
     // Reattach — verify we can connect and receive a frame.
     let mut stream_b = UnixStream::connect(&client_socket).expect("should reattach");
     let (version, error) =
-        client_handshake(&mut stream_b, 1, 80, 24).expect("reattach handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_b, 2, 80, 24).expect("reattach handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Verify the reattached client receives a frame.
@@ -811,8 +604,8 @@ fn server_persists_after_client_connection_drop() {
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
     let (version, error) =
-        client_handshake(&mut stream, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Drain initial frames.
@@ -821,8 +614,12 @@ fn server_persists_after_client_connection_drop() {
     // Drop the connection abruptly (simulating client crash).
     drop(stream);
 
-    // Give the server time to detect the disconnection.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after client connection drop"
+    );
 
     // Verify server is still alive.
     let response = ping_socket(&api_socket);
@@ -834,9 +631,67 @@ fn server_persists_after_client_connection_drop() {
     // Reattach — verify we can connect and handshake again.
     let mut stream_b = UnixStream::connect(&client_socket).expect("should reattach");
     let (version, error) =
-        client_handshake(&mut stream_b, 1, 80, 24).expect("reattach handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_b, 2, 80, 24).expect("reattach handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "reattach should succeed: {:?}", error);
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
+fn detached_output_preserves_last_attached_pty_size() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
+    let (version, error) =
+        client_handshake(&mut stream, 2, 120, 40).expect("handshake should succeed");
+    assert_eq!(version, 2);
+    assert!(error.is_none(), "{:?}", error);
+    drain_messages(&mut stream);
+
+    let create = workspace_create(&api_socket, "detached-size");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+
+    let before = read_pane_tty_size_after_marker(
+        &api_socket,
+        &pane_id,
+        "SIZE_BEFORE_DETACH",
+        Duration::from_secs(5),
+    );
+
+    send_detach(&mut stream).expect("send detach");
+    drop(stream);
+
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist after detach"
+    );
+
+    let while_detached = read_pane_tty_size_after_marker(
+        &api_socket,
+        &pane_id,
+        "SIZE_WHILE_DETACHED",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(
+        while_detached, before,
+        "detached renders should not resize live pane PTYs to a fallback size"
+    );
 
     cleanup_spawned_herdr(spawned, base);
 }
@@ -867,13 +722,19 @@ fn output_accumulated_while_detached_visible_on_reattach() {
     // Connect and handshake client A.
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");
     let (version, error) =
-        client_handshake(&mut stream_a, 1, 80, 24).expect("handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_a, 2, 80, 24).expect("handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Detach client A immediately.
     send_detach(&mut stream_a).expect("send detach");
-    thread::sleep(Duration::from_millis(500));
+
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            ping_socket(&api_socket).contains("pong")
+        }),
+        "server should persist"
+    );
 
     // Verify server alive.
     let response = ping_socket(&api_socket);
@@ -886,8 +747,6 @@ fn output_accumulated_while_detached_visible_on_reattach() {
     // First create a workspace and find its pane.
     let ws_create_response = workspace_create(&api_socket, "scrollback-test");
     assert_eq!(ws_create_response["result"]["type"], "workspace_created");
-
-    thread::sleep(Duration::from_millis(300));
 
     // Find the workspace and pane IDs.
     let ws_response = workspace_list(&api_socket);
@@ -907,14 +766,22 @@ fn output_accumulated_while_detached_visible_on_reattach() {
     let mut send_response = String::new();
     send_reader.read_line(&mut send_response).unwrap();
 
-    // Wait for the echo command to execute.
-    thread::sleep(Duration::from_millis(500));
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            let read_response = pane_read_recent(&api_socket, &pane_id);
+            read_response["result"]["read"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("DURING_DETACH")
+        }),
+        "pane should contain output produced while detached before reattach"
+    );
 
     // --- Client B (reattach) ---
     let mut stream_b = UnixStream::connect(&client_socket).expect("client B should connect");
     let (version, error) =
-        client_handshake(&mut stream_b, 1, 80, 24).expect("reattach handshake should succeed");
-    assert_eq!(version, 1);
+        client_handshake(&mut stream_b, 2, 80, 24).expect("reattach handshake should succeed");
+    assert_eq!(version, 2);
     assert!(error.is_none(), "{:?}", error);
 
     // Client B should receive a frame with the current state.

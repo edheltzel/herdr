@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use tracing::{error, info, warn};
+use tracing::warn;
 
 use super::snapshot::{parse_snapshot, snapshot_file_version, SessionSnapshot, SNAPSHOT_VERSION};
 
 fn session_path() -> PathBuf {
-    crate::config::config_dir().join("session.json")
+    crate::session::data_dir().join("session.json")
 }
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
@@ -33,19 +33,19 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
 pub fn save(snapshot: &SessionSnapshot) {
     let path = session_path();
     if let Err(err) = save_to_path(&path, snapshot) {
-        error!(err = %err, path = %path.display(), "failed to save session");
+        crate::logging::session_save_failed(&path, &err.to_string());
         return;
     }
-    info!(workspaces = snapshot.workspaces.len(), "session saved");
+    crate::logging::session_saved(&path, snapshot.workspaces.len());
 }
 
 pub fn clear() {
     let path = session_path();
     if let Err(err) = clear_path(&path) {
-        error!(err = %err, path = %path.display(), "failed to clear session");
+        crate::logging::session_clear_failed(&path, &err.to_string());
         return;
     }
-    info!(path = %path.display(), "session cleared");
+    crate::logging::session_cleared(&path);
 }
 
 pub fn load() -> Option<SessionSnapshot> {

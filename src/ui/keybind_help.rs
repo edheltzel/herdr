@@ -32,6 +32,10 @@ pub(super) fn keybind_help_groups(
                 "navigate mode",
             ),
             ("prefix + ?".to_string(), "keybinds"),
+            (
+                optional_keybind_label(&kb.reload_config_label),
+                "reload config",
+            ),
         ],
     ));
 

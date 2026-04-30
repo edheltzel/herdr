@@ -1,11 +1,11 @@
 use std::io;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use tracing::info;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
@@ -38,7 +38,9 @@ mod raw_input;
 mod release_notes;
 mod selection;
 mod server;
+mod session;
 mod sound;
+mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
@@ -83,6 +85,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # detach = ""             # optional explicit detach shortcut in server/client mode
+# reload_config = ""      # optional shortcut to reload config.toml without restarting
 # new_tab = "c"
 # rename_tab = ""         # optional, unset by default
 # previous_tab = ""       # optional, unset by default
@@ -110,9 +113,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
-# Optional visual toast notifications for background workspace events
+# Background notification popup delivery
 [ui.toast]
-# enabled = false
+# off = disable pop-up notifications
+# herdr = show top-right in-app toasts
+# terminal = ask the outer terminal to show a desktop notification
+# delivery = "off"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
@@ -155,7 +161,15 @@ fn random_nested_message() -> &'static str {
 }
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let args = match session::configure_from_args(&raw_args) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("run 'herdr --help' for usage");
+            std::process::exit(2);
+        }
+    };
 
     if let cli::CommandOutcome::Handled(code) = cli::maybe_run(&args)? {
         std::process::exit(code);
@@ -185,39 +199,80 @@ fn main() -> io::Result<()> {
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
         println!("Usage: herdr [options]");
+        println!("       herdr --session <name> [options]");
+        println!("       herdr session attach <name>");
         println!("       herdr update");
         println!("       herdr server stop");
+        println!("       herdr server reload-config");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
+        println!("       herdr session <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();
-        println!("Commands:");
-        println!("  server              Run as headless server (no terminal, persists after client disconnect)");
-        println!("  server stop         Stop the running server via the API socket");
-        println!("  client             Connect to a running server as a thin client");
+        println!("Common commands:");
         println!(
-            "  update              Download and install the latest version (run outside herdr)"
+            "  {:<32} {}",
+            "herdr", "Launch or attach to the persistent session"
         );
-        println!("  workspace           workspace helpers over the socket api");
-        println!("  tab                 tab helpers over the socket api");
-        println!("  pane                pane control helpers over the socket api");
-        println!("  wait                blocking wait helpers over the socket api");
-        println!("  integration         manage built-in agent integrations");
+        println!(
+            "  {:<32} {}",
+            "herdr status [server|client]", "Show local client and running server status"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr update", "Download and install the latest version"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr server stop", "Stop the running server via the API socket"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr server reload-config", "Reload config.toml in the running server"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr workspace <subcommand>", "Workspace helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr tab <subcommand>", "Tab helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr pane <subcommand>", "Pane control helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr wait <subcommand>", "Blocking wait helpers over the socket API"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr session <subcommand>", "Manage named persistent sessions"
+        );
+        println!(
+            "  {:<32} {}",
+            "herdr integration <subcommand>", "Manage built-in agent integrations"
+        );
+        println!();
+        println!("Advanced commands:");
+        println!("  {:<32} {}", "herdr server", "Run as headless server");
+        println!(
+            "  {:<32} {}",
+            "herdr client", "Connect to a running server as a thin client"
+        );
         println!();
         println!("Options:");
         println!("  --no-session        Run monolithically (no server/client, escape hatch)");
+        println!("  --session <name>    Use or create a named persistent session");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
-        println!("  --show-changelog    Preview the current version's release notes");
         println!("  --help, -h          Show this help");
         println!();
         println!("Config: {}", config::config_path().display());
-        println!(
-            "Logs:   {}",
-            config::config_dir().join("herdr.log").display()
-        );
+        println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
         return Ok(());
@@ -236,10 +291,10 @@ fn main() -> io::Result<()> {
     // Reject unknown flags
     let known_flags = [
         "--no-session",
+        "--session",
         "--version",
         "-V",
         "--default-config",
-        "--show-changelog",
         "--help",
         "-h",
     ];
@@ -254,9 +309,11 @@ fn main() -> io::Result<()> {
                 "server",
                 "client",
                 "update",
+                "status",
                 "workspace",
                 "pane",
                 "wait",
+                "session",
                 "integration",
             ]
             .contains(&arg.as_str())
@@ -281,7 +338,6 @@ fn main() -> io::Result<()> {
     // Auto-detect launch: when --no-session is NOT set, use server/client mode.
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
-        init_logging();
         return server::autodetect::auto_detect_launch();
     }
 
@@ -302,7 +358,6 @@ fn main() -> io::Result<()> {
         Err(err) => return Err(err),
     };
 
-    let show_changelog = args.iter().any(|a| a == "--show-changelog");
     let in_tmux = std::env::var("TMUX").is_ok();
 
     let original_hook = std::panic::take_hook();
@@ -315,6 +370,7 @@ fn main() -> io::Result<()> {
         let _ = execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
+            DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         );
@@ -323,18 +379,8 @@ fn main() -> io::Result<()> {
     }));
 
     let config = &loaded_config.config;
-    let config_diagnostic = if loaded_config.diagnostics.is_empty() {
-        None
-    } else if loaded_config.diagnostics.len() == 1 {
-        Some(loaded_config.diagnostics[0].clone())
-    } else {
-        Some(format!(
-            "{} (and {} more)",
-            loaded_config.diagnostics[0],
-            loaded_config.diagnostics.len() - 1
-        ))
-    };
-    info!("herdr starting (monolithic), pid={}", std::process::id());
+    let config_diagnostic = config::config_diagnostic_summary(&loaded_config.diagnostics);
+    logging::startup("app");
 
     // Background update check (non-blocking, best-effort)
     // Only checks for newer versions and notifies the TUI.
@@ -351,6 +397,7 @@ fn main() -> io::Result<()> {
             io::stdout(),
             EnableMouseCapture,
             EnableBracketedPaste,
+            EnableFocusChange,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -367,11 +414,7 @@ fn main() -> io::Result<()> {
             std::io::stdout().flush()?;
         }
 
-        let startup_release_notes = if show_changelog {
-            crate::release_notes::load_preview_from_local_changelog(env!("CARGO_PKG_VERSION"))
-        } else {
-            crate::release_notes::load_pending_for_current_version()
-        };
+        let startup_release_notes = crate::release_notes::load_pending_for_current_version();
 
         let mut app = app::App::new(
             config,
@@ -393,6 +436,7 @@ fn main() -> io::Result<()> {
         execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
+            DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         )?;
@@ -407,7 +451,7 @@ fn main() -> io::Result<()> {
     // Shut down runtime immediately — kills lingering PTY reader/writer tasks
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
 
-    info!("herdr exiting");
+    logging::shutdown("app");
     result
 }
 

@@ -6,12 +6,11 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::schema::{
-    AgentStatus, EmptyParams, IntegrationInstallParams, IntegrationTarget,
-    IntegrationUninstallParams, Method, OutputMatch, PaneListParams, PaneReadParams,
-    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneTarget,
-    PaneWaitForOutputParams, ReadSource, Request, SplitDirection, Subscription, TabCreateParams,
-    TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceRenameParams,
-    WorkspaceTarget,
+    AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
+    PaneReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
+    PaneTarget, PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection,
+    Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -31,11 +30,13 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             };
             exit_code
         }
+        "status" => run_status_command(&args[2..])?,
         "workspace" => run_workspace_command(&args[2..])?,
         "tab" => run_tab_command(&args[2..])?,
         "pane" => run_pane_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => run_integration_command(&args[2..])?,
+        "session" => run_session_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 
@@ -49,6 +50,7 @@ fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
 
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
+        "reload-config" => server_reload_config(&args[1..]).map(Some),
         "help" | "--help" | "-h" => {
             print_server_help();
             Ok(Some(0))
@@ -58,6 +60,160 @@ fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
             Ok(Some(2))
         }
     }
+}
+
+fn run_status_command(args: &[String]) -> std::io::Result<i32> {
+    match args.first().map(|arg| arg.as_str()) {
+        None => print_full_status(),
+        Some("server") => {
+            if args.len() > 1 {
+                eprintln!("usage: herdr status server");
+                return Ok(2);
+            }
+            print_server_status()
+        }
+        Some("client") => {
+            if args.len() > 1 {
+                eprintln!("usage: herdr status client");
+                return Ok(2);
+            }
+            print_client_status();
+            Ok(0)
+        }
+        Some("help" | "--help" | "-h") => {
+            print_status_help();
+            Ok(0)
+        }
+        Some(_) => {
+            print_status_help();
+            Ok(2)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerRuntimeStatus {
+    Running {
+        version: Option<String>,
+        protocol: Option<u32>,
+    },
+    NotRunning,
+}
+
+fn print_full_status() -> std::io::Result<i32> {
+    let server = read_server_runtime_status()?;
+
+    println!("client:");
+    println!("  version: {}", env!("CARGO_PKG_VERSION"));
+    println!("  protocol: {}", crate::server::protocol::PROTOCOL_VERSION);
+    println!();
+    println!("server:");
+    print_server_status_body(&server, "  ");
+    println!();
+    println!("update:");
+    println!("  restart_needed: {}", restart_needed_label(&server));
+
+    Ok(0)
+}
+
+fn print_server_status() -> std::io::Result<i32> {
+    let server = read_server_runtime_status()?;
+    print_server_status_body(&server, "");
+    Ok(0)
+}
+
+fn print_client_status() {
+    println!("version: {}", env!("CARGO_PKG_VERSION"));
+    println!("protocol: {}", crate::server::protocol::PROTOCOL_VERSION);
+    println!("binary: {}", current_exe_label());
+}
+
+fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
+    match server {
+        ServerRuntimeStatus::Running { version, protocol } => {
+            println!("{indent}status: running");
+            println!("{indent}version: {}", option_label(version.as_deref()));
+            println!("{indent}protocol: {}", protocol_label(*protocol));
+            println!("{indent}compatible: {}", compatibility_label(*protocol));
+            println!("{indent}socket: {}", api::socket_path().display());
+        }
+        ServerRuntimeStatus::NotRunning => {
+            println!("{indent}status: not running");
+            println!("{indent}socket: {}", api::socket_path().display());
+        }
+    }
+}
+
+fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
+    match send_request(&Request {
+        id: "cli:status:server".into(),
+        method: Method::Ping(PingParams::default()),
+    }) {
+        Ok(response) => {
+            if response.get("error").is_some() {
+                return Err(std::io::Error::other(format!(
+                    "server status request failed: {}",
+                    response
+                )));
+            }
+
+            let result = &response["result"];
+            Ok(ServerRuntimeStatus::Running {
+                version: result
+                    .get("version")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                protocol: result
+                    .get("protocol")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok()),
+            })
+        }
+        Err(err) if server_not_running_error(&err) => Ok(ServerRuntimeStatus::NotRunning),
+        Err(err) => Err(err),
+    }
+}
+
+fn server_not_running_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+fn option_label(value: Option<&str>) -> &str {
+    value.unwrap_or("unknown")
+}
+
+fn protocol_label(protocol: Option<u32>) -> String {
+    protocol
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn compatibility_label(protocol: Option<u32>) -> &'static str {
+    match protocol {
+        Some(protocol) if protocol == crate::server::protocol::PROTOCOL_VERSION => "yes",
+        Some(_) => "no",
+        None => "unknown",
+    }
+}
+
+fn restart_needed_label(server: &ServerRuntimeStatus) -> &'static str {
+    match server {
+        ServerRuntimeStatus::Running { version, .. } => match version.as_deref() {
+            Some(version) if version == env!("CARGO_PKG_VERSION") => "no",
+            Some(_) => "yes",
+            None => "unknown",
+        },
+        ServerRuntimeStatus::NotRunning => "no",
+    }
+}
+
+fn current_exe_label() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|err| format!("unknown ({err})"))
 }
 
 fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
@@ -73,6 +229,10 @@ fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => workspace_focus(&args[1..]),
         "rename" => workspace_rename(&args[1..]),
         "close" => workspace_close(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_workspace_help();
+            Ok(0)
+        }
         _ => {
             print_workspace_help();
             Ok(2)
@@ -93,6 +253,10 @@ fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
         "focus" => tab_focus(&args[1..]),
         "rename" => tab_rename(&args[1..]),
         "close" => tab_close(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_tab_help();
+            Ok(0)
+        }
         _ => {
             print_tab_help();
             Ok(2)
@@ -115,6 +279,10 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
         "run" => pane_run(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_pane_help();
+            Ok(0)
+        }
         _ => {
             print_pane_help();
             Ok(2)
@@ -131,6 +299,10 @@ fn run_wait_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "output" => wait_output(&args[1..]),
         "agent-status" => wait_agent_status(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_wait_help();
+            Ok(0)
+        }
         _ => {
             print_wait_help();
             Ok(2)
@@ -147,8 +319,34 @@ fn run_integration_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "install" => integration_install(&args[1..]),
         "uninstall" => integration_uninstall(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_integration_help();
+            Ok(0)
+        }
         _ => {
             print_integration_help();
+            Ok(2)
+        }
+    }
+}
+
+fn run_session_command(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
+        print_session_help();
+        return Ok(2);
+    };
+
+    match subcommand {
+        "list" => session_list(&args[1..]),
+        "attach" => session_attach_help(&args[1..]),
+        "stop" => session_stop(&args[1..]),
+        "delete" => session_delete(&args[1..]),
+        "help" | "--help" | "-h" => {
+            print_session_help();
+            Ok(0)
+        }
+        _ => {
+            print_session_help();
             Ok(2)
         }
     }
@@ -161,6 +359,106 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
     }
 
     send_ok_request(Method::ServerStop(EmptyParams::default()))
+}
+
+fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr server reload-config");
+        return Ok(2);
+    }
+
+    print_response(&send_request(&Request {
+        id: "cli:server:reload-config".into(),
+        method: Method::ServerReloadConfig(EmptyParams::default()),
+    })?)
+}
+
+fn session_attach_help(args: &[String]) -> std::io::Result<i32> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        eprintln!("usage: herdr session attach <name>");
+        return Ok(0);
+    }
+    eprintln!("usage: herdr session attach <name>");
+    Ok(2)
+}
+
+fn session_list(args: &[String]) -> std::io::Result<i32> {
+    let json = match parse_session_json_only(args, "usage: herdr session list [--json]") {
+        Ok(json) => json,
+        Err(code) => return Ok(code),
+    };
+
+    let sessions = crate::session::list_sessions()?;
+    if json {
+        _print_json(&serde_json::json!({
+            "sessions": sessions,
+        }));
+    } else {
+        print_session_table(&sessions);
+    }
+    Ok(0)
+}
+
+fn session_stop(args: &[String]) -> std::io::Result<i32> {
+    let (name, json) =
+        match parse_session_name_and_json(args, "usage: herdr session stop <name> [--json]") {
+            Ok(parsed) => parsed,
+            Err(code) => return Ok(code),
+        };
+
+    let target = match crate::session::parse_target_name(&name) {
+        Ok(target) => target,
+        Err(message) => {
+            print_session_error("invalid_session_name", &message);
+            return Ok(1);
+        }
+    };
+    match crate::session::stop_session(target.as_deref()) {
+        Ok(session) => {
+            if json {
+                _print_json(&serde_json::json!({
+                    "stopped": true,
+                    "session": session,
+                }));
+            } else {
+                println!("stopped session {}", session.name);
+            }
+            Ok(0)
+        }
+        Err(message) => {
+            print_session_error("session_stop_failed", &message);
+            Ok(1)
+        }
+    }
+}
+
+fn session_delete(args: &[String]) -> std::io::Result<i32> {
+    let (name, json) =
+        match parse_session_name_and_json(args, "usage: herdr session delete <name> [--json]") {
+            Ok(parsed) => parsed,
+            Err(code) => return Ok(code),
+        };
+
+    match crate::session::delete_session(&name) {
+        Ok(session) => {
+            if json {
+                _print_json(&serde_json::json!({
+                    "deleted": true,
+                    "session": session,
+                }));
+            } else {
+                println!("deleted session {}", session.name);
+            }
+            Ok(0)
+        }
+        Err(message) => {
+            print_session_error("session_delete_failed", &message);
+            Ok(1)
+        }
+    }
 }
 
 fn workspace_list(args: &[String]) -> std::io::Result<i32> {
@@ -663,26 +961,16 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let response = send_request(&Request {
-        id: "cli:integration:install".into(),
-        method: Method::IntegrationInstall(IntegrationInstallParams { target }),
-    })?;
-
-    if let Some(error) = response.get("error") {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
-        return Ok(1);
+    match crate::integration::install_target(target) {
+        Ok(messages) => {
+            print_integration_messages(messages);
+            Ok(0)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
     }
-
-    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
-        eprintln!("invalid integration install response");
-        return Ok(1);
-    };
-
-    for message in messages.iter().filter_map(|entry| entry.as_str()) {
-        println!("{message}");
-    }
-
-    Ok(0)
 }
 
 fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
@@ -690,26 +978,22 @@ fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    let response = send_request(&Request {
-        id: "cli:integration:uninstall".into(),
-        method: Method::IntegrationUninstall(IntegrationUninstallParams { target }),
-    })?;
-
-    if let Some(error) = response.get("error") {
-        eprintln!("{}", serde_json::to_string(error).unwrap());
-        return Ok(1);
+    match crate::integration::uninstall_target(target) {
+        Ok(messages) => {
+            print_integration_messages(messages);
+            Ok(0)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            Ok(1)
+        }
     }
+}
 
-    let Some(messages) = response["result"]["details"]["messages"].as_array() else {
-        eprintln!("invalid integration uninstall response");
-        return Ok(1);
-    };
-
-    for message in messages.iter().filter_map(|entry| entry.as_str()) {
+fn print_integration_messages(messages: Vec<String>) {
+    for message in messages {
         println!("{message}");
     }
-
-    Ok(0)
 }
 
 fn parse_integration_target(
@@ -1037,10 +1321,83 @@ fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+fn parse_session_json_only(args: &[String], usage: &str) -> Result<bool, i32> {
+    match args {
+        [] => Ok(false),
+        [flag] if flag == "--json" => Ok(true),
+        _ => {
+            eprintln!("{usage}");
+            Err(2)
+        }
+    }
+}
+
+fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, bool), i32> {
+    let mut name = None;
+    let mut json = false;
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else if name.is_none() {
+            name = Some(arg.clone());
+        } else {
+            eprintln!("{usage}");
+            return Err(2);
+        }
+    }
+
+    let Some(name) = name else {
+        eprintln!("{usage}");
+        return Err(2);
+    };
+    Ok((name, json))
+}
+
+fn print_session_table(sessions: &[crate::session::SessionInfo]) {
+    println!(
+        "{:<20} {:<8} {:<48} {}",
+        "name", "status", "directory", "socket"
+    );
+    for session in sessions {
+        println!(
+            "{:<20} {:<8} {:<48} {}",
+            session.name,
+            if session.running {
+                "running"
+            } else {
+                "stopped"
+            },
+            session.session_dir,
+            session.socket_path
+        );
+    }
+}
+
+fn print_session_error(code: &str, message: &str) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        }))
+        .unwrap()
+    );
+}
+
 fn print_server_help() {
     eprintln!("herdr server commands:");
     eprintln!("  herdr server                run as headless server");
-    eprintln!("  herdr server stop           stop the running server via the api socket");
+    eprintln!("  herdr server stop           stop the running server via the API socket");
+    eprintln!("  herdr server reload-config  reload config.toml in the running server");
+}
+
+fn print_status_help() {
+    eprintln!("herdr status commands:");
+    eprintln!("  herdr status         show local client and running server status");
+    eprintln!("  herdr status server  show running server status");
+    eprintln!("  herdr status client  show local client binary status");
 }
 
 fn print_workspace_help() {
@@ -1069,7 +1426,7 @@ fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N]");
+    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]");
     eprintln!("  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
@@ -1079,7 +1436,7 @@ fn print_pane_help() {
 
 fn print_wait_help() {
     eprintln!("herdr wait commands:");
-    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex]");
+    eprintln!("  herdr wait output <pane_id> --match <text> [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--regex] [--raw]");
     eprintln!(
         "  herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [--timeout MS]"
     );
@@ -1095,6 +1452,15 @@ fn print_integration_help() {
     eprintln!("  herdr integration uninstall claude");
     eprintln!("  herdr integration uninstall codex");
     eprintln!("  herdr integration uninstall opencode");
+}
+
+fn print_session_help() {
+    eprintln!("herdr session commands:");
+    eprintln!("  herdr session list [--json]");
+    eprintln!("  herdr session attach <name>");
+    eprintln!("  herdr session stop <name> [--json]");
+    eprintln!("  herdr session delete <name> [--json]");
+    eprintln!("  use 'default' as <name> to target the default session for stop");
 }
 
 fn _print_json<T: Serialize>(value: &T) {

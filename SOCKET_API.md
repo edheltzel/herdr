@@ -23,13 +23,21 @@ important difference: `pane.run` and `wait agent-status` are **cli conveniences*
 - request/response: send one json request per line, read one json response per line
 - subscriptions: send `events.subscribe`, receive an ack, then keep the same connection open and continue reading pushed events
 
+named sessions are runtime/socket namespaces, not replacements for herdr workspaces. each named session has its own server sockets and persistent runtime state while config remains global.
+
 socket path resolution order:
 
-1. `HERDR_SOCKET_PATH`
-2. `$XDG_RUNTIME_DIR/herdr.sock`
-3. `$XDG_CONFIG_HOME/herdr/herdr.sock`
-4. `$HOME/.config/herdr/herdr.sock`
-5. `/tmp/herdr.sock`
+1. explicit `herdr --session <name>`:
+   `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock` or `$HOME/.config/herdr/sessions/<name>/herdr.sock`
+2. `HERDR_SOCKET_PATH`
+3. `HERDR_SESSION=<name>`:
+   `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock` or `$HOME/.config/herdr/sessions/<name>/herdr.sock`
+4. default session path:
+   `$XDG_CONFIG_HOME/herdr/herdr.sock` or `$HOME/.config/herdr/herdr.sock`
+
+this means `HERDR_SOCKET_PATH` remains an exact low-level socket override, but an explicit cli `--session <name>` still wins when a command runs inside a pane that inherited `HERDR_SOCKET_PATH`.
+
+session names may contain ASCII letters, numbers, `.`, `_`, and `-`. `default` is reserved for the default session. use `herdr session list`, `herdr session attach <name>`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage session namespaces. session commands print human-readable output by default; pass `--json` for machine-readable output. `session delete` refuses running sessions and does not delete the default session.
 
 ## request and response envelopes
 
@@ -50,7 +58,8 @@ successful responses look like:
   "id": "req_1",
   "result": {
     "type": "pong",
-    "version": "0.1.2"
+    "version": "0.1.2",
+    "protocol": 2
   }
 }
 ```
@@ -891,9 +900,19 @@ example pushed `pane.agent_status_changed` event:
 `agent` in pushed events follows the same rules as `pane_info.agent`: it may be a built-in detected name, a custom hook-reported label, or omitted.
 ## cli wrappers
 
-these commands talk to the same local socket surface and are usually the easiest starting point for shell scripts and coding agents.
+these commands provide the shell-facing control surface. most command groups talk to the local socket; `status client` only inspects the local executable.
 
 ### command groups
+
+status commands:
+
+```text
+herdr status
+herdr status server
+herdr status client
+```
+
+`herdr -V` and `herdr --version` print the local executable version without contacting the server. `herdr status` compares that local executable with the running server when one is reachable.
 
 workspace commands:
 
@@ -939,6 +958,9 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 
 ### cli behavior notes
 
+- `status` prints local client version/protocol, running server version/protocol when reachable, socket path, compatibility, and whether a restart is needed
+- `status server` prints only the running server side; if no server is reachable it exits successfully and prints `status: not running`
+- `status client` prints only the local executable version/protocol and binary path without contacting the server
 - `workspace create` focuses by default; pass `--no-focus` to keep focus where it is
 - `workspace create` without `--label` keeps the default cwd-based workspace naming
 - `workspace create --label` applies the custom workspace name immediately

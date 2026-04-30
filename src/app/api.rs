@@ -47,6 +47,11 @@ impl App {
             None
         };
 
+        let update_ready_version = if let AppEvent::UpdateReady { version } = &ev {
+            Some(version.clone())
+        } else {
+            None
+        };
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
         for update in &pane_updates {
@@ -64,6 +69,65 @@ impl App {
         if let Some(overlay) = overlay_state {
             self.restore_overlay_after_exit(overlay);
         }
+
+        if self.local_terminal_notifications
+            && matches!(
+                self.state.toast_config.delivery,
+                crate::config::ToastDelivery::Terminal
+            )
+        {
+            if let Some(version) = update_ready_version {
+                let _ = crate::terminal_notify::show_notification(
+                    &format!("v{version} available"),
+                    Some("detach, then run `herdr update`"),
+                );
+            } else {
+                for update in &pane_updates {
+                    let is_active_tab = self
+                        .state
+                        .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+                    let suppress_active_tab_notifications =
+                        crate::app::actions::active_tab_suppresses_notifications(
+                            is_active_tab,
+                            self.state.outer_terminal_focus,
+                        );
+                    let Some(kind) = crate::app::actions::notification_toast_for_state_change(
+                        suppress_active_tab_notifications,
+                        update.previous_state,
+                        update.state,
+                    ) else {
+                        continue;
+                    };
+                    let Some(ws) = self.state.workspaces.get(update.ws_idx) else {
+                        continue;
+                    };
+                    let Some(pane) = ws
+                        .tabs
+                        .iter()
+                        .find_map(|tab| tab.panes.get(&update.pane_id))
+                    else {
+                        continue;
+                    };
+                    let Some(agent_label) = pane.effective_agent_label() else {
+                        continue;
+                    };
+                    let event_text = match kind {
+                        ToastKind::NeedsAttention => "needs attention",
+                        ToastKind::Finished => "finished",
+                        ToastKind::UpdateInstalled => "updated",
+                    };
+                    let _ = crate::terminal_notify::show_notification(
+                        &format!("{} {}", agent_label, event_text),
+                        Some(&crate::app::actions::notification_context(
+                            ws,
+                            update.ws_idx,
+                            update.pane_id,
+                        )),
+                    );
+                }
+            }
+        }
+
         self.sync_toast_deadline(previous_toast);
     }
 
@@ -212,9 +276,9 @@ impl App {
         use bytes::Bytes;
 
         use crate::api::schema::{
-            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationTarget,
-            IntegrationUninstallResult, Method, PaneListParams, PaneReadResult, ReadSource,
-            ResponseResult, SuccessResponse, TabListParams,
+            ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationUninstallResult, Method,
+            PaneListParams, PaneReadResult, ReadSource, ResponseResult, SuccessResponse,
+            TabListParams,
         };
 
         let response = match request.method {
@@ -223,6 +287,16 @@ impl App {
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::Ok {},
+                }
+            }
+            Method::ServerReloadConfig(_) => {
+                let report = self.reload_config();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::ConfigReload {
+                        status: report.status,
+                        diagnostics: report.diagnostics,
+                    },
                 }
             }
             Method::WorkspaceList(_) => SuccessResponse {
@@ -276,6 +350,7 @@ impl App {
                         if let Some(label) = params.label {
                             if let Some(workspace) = self.state.workspaces.get_mut(index) {
                                 workspace.set_custom_name(label);
+                                crate::logging::workspace_renamed(&workspace.id);
                             }
                         }
                         let workspace = self.workspace_info(index);
@@ -371,6 +446,7 @@ impl App {
                     .unwrap();
                 };
                 ws.set_custom_name(params.label.clone());
+                crate::logging::workspace_renamed(&ws.id);
                 self.schedule_session_save();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::WorkspaceRenamed,
@@ -547,6 +623,10 @@ impl App {
                 match result {
                     Ok(tab_idx) => {
                         if let Some(label) = label {
+                            let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                            let tab_id = self
+                                .public_tab_id(ws_idx, tab_idx)
+                                .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
                             if let Some(tab) = self
                                 .state
                                 .workspaces
@@ -554,6 +634,7 @@ impl App {
                                 .and_then(|ws| ws.tabs.get_mut(tab_idx))
                             {
                                 tab.set_custom_name(label);
+                                crate::logging::tab_renamed(&workspace_id, &tab_id);
                             }
                         }
                         if focus {
@@ -625,6 +706,10 @@ impl App {
                     })
                     .unwrap();
                 };
+                let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                let tab_id = self
+                    .public_tab_id(ws_idx, tab_idx)
+                    .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
                 let Some(tab) = self
                     .state
                     .workspaces
@@ -641,6 +726,7 @@ impl App {
                     .unwrap();
                 };
                 tab.set_custom_name(params.label.clone());
+                crate::logging::tab_renamed(&workspace_id, &tab_id);
                 self.schedule_session_save();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabRenamed,
@@ -1166,97 +1252,17 @@ impl App {
             }
             Method::IntegrationInstall(params) => {
                 let target = params.target;
-                let messages = match target {
-                    IntegrationTarget::Pi => {
-                        let path = crate::integration::install_pi().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match path {
-                            Ok(path) => {
-                                vec![format!("installed pi integration to {}", path.display())]
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Claude => {
-                        let installed = crate::integration::install_claude().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => vec![
-                                format!(
-                                    "installed claude integration hook to {}",
-                                    installed.hook_path.display()
-                                ),
-                                format!(
-                                    "ensured claude settings at {}",
-                                    installed.settings_path.display()
-                                ),
-                            ],
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Codex => {
-                        let installed = crate::integration::install_codex().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => vec![
-                                format!(
-                                    "installed codex integration hook to {}",
-                                    installed.hook_path.display()
-                                ),
-                                format!(
-                                    "ensured codex hooks at {}",
-                                    installed.hooks_path.display()
-                                ),
-                                format!(
-                                    "ensured codex config at {}",
-                                    installed.config_path.display()
-                                ),
-                            ],
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Opencode => {
-                        let installed = crate::integration::install_opencode().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_install_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match installed {
-                            Ok(installed) => vec![format!(
-                                "installed opencode integration plugin to {}",
-                                installed.plugin_path.display()
-                            )],
-                            Err(response) => return response,
-                        }
+                let messages = match crate::integration::install_target(target) {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "integration_install_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
                     }
                 };
 
@@ -1270,148 +1276,17 @@ impl App {
             }
             Method::IntegrationUninstall(params) => {
                 let target = params.target;
-                let messages = match target {
-                    IntegrationTarget::Pi => {
-                        let result = crate::integration::uninstall_pi().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                if result.removed_extension {
-                                    vec![format!(
-                                        "removed pi integration extension at {}",
-                                        result.extension_path.display()
-                                    )]
-                                } else {
-                                    vec![format!(
-                                        "no pi integration extension found at {}",
-                                        result.extension_path.display()
-                                    )]
-                                }
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Claude => {
-                        let result = crate::integration::uninstall_claude().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                let mut messages = Vec::new();
-                                if result.removed_hook_file {
-                                    messages.push(format!(
-                                        "removed claude hook at {}",
-                                        result.hook_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no claude hook found at {}",
-                                        result.hook_path.display()
-                                    ));
-                                }
-                                if result.updated_settings {
-                                    messages.push(format!(
-                                        "removed herdr claude hook entries from {}",
-                                        result.settings_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no herdr claude hook entries found in {}",
-                                        result.settings_path.display()
-                                    ));
-                                }
-                                messages
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Codex => {
-                        let result = crate::integration::uninstall_codex().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                let mut messages = Vec::new();
-                                if result.removed_hook_file {
-                                    messages.push(format!(
-                                        "removed codex hook at {}",
-                                        result.hook_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no codex hook found at {}",
-                                        result.hook_path.display()
-                                    ));
-                                }
-                                if result.updated_hooks {
-                                    messages.push(format!(
-                                        "removed herdr codex hook entries from {}",
-                                        result.hooks_path.display()
-                                    ));
-                                } else {
-                                    messages.push(format!(
-                                        "no herdr codex hook entries found in {}",
-                                        result.hooks_path.display()
-                                    ));
-                                }
-                                messages.push(format!(
-                                    "left codex config unchanged at {}",
-                                    result.config_path.display()
-                                ));
-                                messages
-                            }
-                            Err(response) => return response,
-                        }
-                    }
-                    IntegrationTarget::Opencode => {
-                        let result = crate::integration::uninstall_opencode().map_err(|err| {
-                            serde_json::to_string(&ErrorResponse {
-                                id: request.id.clone(),
-                                error: ErrorBody {
-                                    code: "integration_uninstall_failed".into(),
-                                    message: err.to_string(),
-                                },
-                            })
-                            .unwrap()
-                        });
-                        match result {
-                            Ok(result) => {
-                                if result.removed_plugin {
-                                    vec![format!(
-                                        "removed opencode integration plugin at {}",
-                                        result.plugin_path.display()
-                                    )]
-                                } else {
-                                    vec![format!(
-                                        "no opencode integration plugin found at {}",
-                                        result.plugin_path.display()
-                                    )]
-                                }
-                            }
-                            Err(response) => return response,
-                        }
+                let messages = match crate::integration::uninstall_target(target) {
+                    Ok(messages) => messages,
+                    Err(err) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "integration_uninstall_failed".into(),
+                                message: err.to_string(),
+                            },
+                        })
+                        .unwrap();
                     }
                 };
 

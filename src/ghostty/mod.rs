@@ -1163,6 +1163,51 @@ mod tests {
         }
     }
 
+    fn build_info_bool(data: ffi::GhosttyBuildInfo) -> bool {
+        let mut out = false;
+        unsafe {
+            ffi::ghostty_build_info(data, (&mut out as *mut bool).cast())
+                .into_result()
+                .unwrap();
+        }
+        out
+    }
+
+    fn build_info_optimize() -> ffi::GhosttyOptimizeMode {
+        let mut out = ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_DEBUG;
+        unsafe {
+            ffi::ghostty_build_info(
+                ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_OPTIMIZE,
+                (&mut out as *mut ffi::GhosttyOptimizeMode).cast(),
+            )
+            .into_result()
+            .unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn build_info_contract_matches_expected_vendored_features() {
+        let _simd = build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_SIMD);
+        let _tmux_control_mode =
+            build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_TMUX_CONTROL_MODE);
+        let kitty_graphics =
+            build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_KITTY_GRAPHICS);
+        assert!(
+            !kitty_graphics,
+            "current herdr vendor must keep Kitty graphics disabled until image handling is explicit"
+        );
+
+        let optimize = build_info_optimize();
+        assert!(matches!(
+            optimize,
+            ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_DEBUG
+                | ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_RELEASE_SAFE
+                | ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_RELEASE_SMALL
+                | ffi::GhosttyOptimizeMode_GHOSTTY_OPTIMIZE_RELEASE_FAST
+        ));
+    }
+
     #[test]
     fn focus_encoding_matches_expected_sequences() {
         assert_eq!(encode_focus(FocusEvent::Gained).unwrap(), b"\x1b[I");
@@ -1279,6 +1324,39 @@ mod tests {
         let after = terminal.scrollbar().unwrap();
         assert_eq!(after.offset, 0);
         assert_eq!(after.len, before.len);
+    }
+
+    #[test]
+    fn active_screen_and_cursor_visibility_contract() {
+        let mut terminal = Terminal::new(12, 3, 0).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+
+        terminal.write(b"primary");
+        assert_eq!(terminal.active_screen().unwrap(), ActiveScreen::Primary);
+        assert_eq!(
+            terminal.read_text_viewport((0, 0), (6, 0), false).unwrap(),
+            "primary"
+        );
+
+        render_state.update(&terminal).unwrap();
+        assert_eq!(render_state.cursor_visible().unwrap(), true);
+        terminal.write(b"\x1b[?25l");
+        render_state.update(&terminal).unwrap();
+        assert_eq!(render_state.cursor_visible().unwrap(), false);
+
+        terminal.write(b"\x1b[?1049h\x1b[HALT");
+        assert_eq!(terminal.active_screen().unwrap(), ActiveScreen::Alternate);
+        assert_eq!(
+            terminal.read_text_viewport((0, 0), (2, 0), false).unwrap(),
+            "ALT"
+        );
+
+        terminal.write(b"\x1b[?1049l");
+        assert_eq!(terminal.active_screen().unwrap(), ActiveScreen::Primary);
+        assert_eq!(
+            terminal.read_text_viewport((0, 0), (6, 0), false).unwrap(),
+            "primary"
+        );
     }
 
     #[test]

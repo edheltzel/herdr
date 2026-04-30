@@ -437,6 +437,7 @@ pub fn self_update() -> Result<Version, String> {
 /// Background update check: only surface availability and release notes.
 /// Runs in a background thread at startup.
 pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    crate::logging::update_check_started();
     if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
         let version = version.trim();
         if !version.is_empty() {
@@ -459,9 +460,14 @@ pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
 
     let release = match check_latest() {
         Ok(Some(r)) => r,
-        _ => return, // up to date or failed — silently do nothing
+        Ok(None) => return,
+        Err(err) => {
+            crate::logging::update_check_failed(&err);
+            return;
+        }
     };
 
+    crate::logging::update_available(&release.version.to_string());
     tracing::info!(
         "new version v{} available at {}",
         release.version,

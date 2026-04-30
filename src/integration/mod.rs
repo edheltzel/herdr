@@ -69,6 +69,159 @@ pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
     cmd.env(HERDR_PANE_ID_ENV_VAR, format!("p_{}", pane_id.raw()));
 }
 
+pub(crate) fn install_target(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    let messages = match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let path = install_pi()?;
+            vec![format!("installed pi integration to {}", path.display())]
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let installed = install_claude()?;
+            vec![
+                format!(
+                    "installed claude integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured claude settings at {}",
+                    installed.settings_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let installed = install_codex()?;
+            vec![
+                format!(
+                    "installed codex integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!("ensured codex hooks at {}", installed.hooks_path.display()),
+                format!(
+                    "ensured codex config at {}",
+                    installed.config_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Opencode => {
+            let installed = install_opencode()?;
+            vec![format!(
+                "installed opencode integration plugin to {}",
+                installed.plugin_path.display()
+            )]
+        }
+    };
+
+    crate::logging::integration_action("install", integration_target_label(target), "ok");
+    Ok(messages)
+}
+
+pub(crate) fn uninstall_target(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    let messages = match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let result = uninstall_pi()?;
+            if result.removed_extension {
+                vec![format!(
+                    "removed pi integration extension at {}",
+                    result.extension_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no pi integration extension found at {}",
+                    result.extension_path.display()
+                )]
+            }
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let result = uninstall_claude()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed claude hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no claude hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr claude hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr claude hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let result = uninstall_codex()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed codex hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no codex hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_hooks {
+                messages.push(format!(
+                    "removed herdr codex hook entries from {}",
+                    result.hooks_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr codex hook entries found in {}",
+                    result.hooks_path.display()
+                ));
+            }
+            messages.push(format!(
+                "left codex config unchanged at {}",
+                result.config_path.display()
+            ));
+            messages
+        }
+        crate::api::schema::IntegrationTarget::Opencode => {
+            let result = uninstall_opencode()?;
+            if result.removed_plugin {
+                vec![format!(
+                    "removed opencode integration plugin at {}",
+                    result.plugin_path.display()
+                )]
+            } else {
+                vec![format!(
+                    "no opencode integration plugin found at {}",
+                    result.plugin_path.display()
+                )]
+            }
+        }
+    };
+
+    crate::logging::integration_action("uninstall", integration_target_label(target), "ok");
+    Ok(messages)
+}
+
+fn integration_target_label(target: crate::api::schema::IntegrationTarget) -> &'static str {
+    match target {
+        crate::api::schema::IntegrationTarget::Pi => "pi",
+        crate::api::schema::IntegrationTarget::Claude => "claude",
+        crate::api::schema::IntegrationTarget::Codex => "codex",
+        crate::api::schema::IntegrationTarget::Opencode => "opencode",
+    }
+}
+
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     if !dir.is_dir() {
@@ -136,6 +289,27 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         hooks,
         "PermissionRequest",
         format!("bash {quoted_hook_path} blocked"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PostToolUse",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PostToolUseFailure",
+        format!("bash {quoted_hook_path} working"),
+        10,
+        Some("*"),
+    )?;
+    ensure_command_hook(
+        hooks,
+        "SubagentStop",
+        format!("bash {quoted_hook_path} working"),
         10,
         Some("*"),
     )?;
@@ -303,6 +477,21 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
                 hooks,
                 "PermissionRequest",
                 &format!("bash {quoted_hook_path} blocked"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PostToolUse",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "PostToolUseFailure",
+                &format!("bash {quoted_hook_path} working"),
+            )?;
+            updated_settings |= remove_command_hook(
+                hooks,
+                "SubagentStop",
+                &format!("bash {quoted_hook_path} working"),
             )?;
             updated_settings |=
                 remove_command_hook(hooks, "Stop", &format!("bash {quoted_hook_path} idle"))?;
@@ -747,6 +936,20 @@ mod tests {
                 .unwrap()
                 .contains(" blocked")
         );
+        assert!(settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" working"));
+        assert!(
+            settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains(" working")
+        );
+        assert!(settings["hooks"]["SubagentStop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" working"));
         assert!(settings["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -790,6 +993,21 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(
+            settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["SubagentStop"].as_array().unwrap().len(),
+            1
+        );
         assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert_eq!(settings["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
 
@@ -810,7 +1028,11 @@ mod tests {
         fs::write(
             claude_dir.join("settings.json"),
             format!(
-                r#"{{"hooks":{{"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                r#"{{"hooks":{{"UserPromptSubmit":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}},{{"type":"command","command":"echo keep","timeout":10}}]}}],"PermissionRequest":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' blocked","timeout":10}}]}}],"PostToolUse":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"PostToolUseFailure":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"SubagentStop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' working","timeout":10}}]}}],"Stop":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' idle","timeout":10}}]}}],"SessionEnd":[{{"matcher":"*","hooks":[{{"type":"command","command":"bash '{}' release","timeout":10}}]}}]}}}}"#,
+                hook_path.display(),
+                hook_path.display(),
+                hook_path.display(),
+                hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
                 hook_path.display(),
@@ -838,6 +1060,10 @@ mod tests {
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             "echo keep"
         );
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
+        assert!(settings["hooks"].get("PostToolUse").is_none());
+        assert!(settings["hooks"].get("PostToolUseFailure").is_none());
+        assert!(settings["hooks"].get("SubagentStop").is_none());
         assert!(settings["hooks"].get("Stop").is_none());
         assert!(settings["hooks"].get("SessionEnd").is_none());
 

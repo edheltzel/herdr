@@ -14,6 +14,8 @@ pub enum Method {
     Ping(PingParams),
     #[serde(rename = "server.stop")]
     ServerStop(EmptyParams),
+    #[serde(rename = "server.reload_config")]
+    ServerReloadConfig(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
@@ -426,6 +428,7 @@ pub struct ErrorBody {
 pub enum ResponseResult {
     Pong {
         version: String,
+        protocol: u32,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -474,6 +477,10 @@ pub enum ResponseResult {
     IntegrationUninstall {
         target: IntegrationTarget,
         details: IntegrationUninstallResult,
+    },
+    ConfigReload {
+        status: crate::config::ConfigReloadStatus,
+        diagnostics: Vec<String>,
     },
     Ok {},
 }
@@ -766,6 +773,19 @@ mod tests {
     }
 
     #[test]
+    fn request_round_trips_for_server_reload_config() {
+        let request = Request {
+            id: "req_reload".into(),
+            method: Method::ServerReloadConfig(EmptyParams::default()),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["method"], "server.reload_config");
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
     fn unknown_method_is_rejected() {
         let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
         let err = serde_json::from_str::<Request>(json)
@@ -921,6 +941,7 @@ mod tests {
             id: "req_1".into(),
             result: ResponseResult::Pong {
                 version: "0.1.2".into(),
+                protocol: 2,
             },
         };
 

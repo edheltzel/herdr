@@ -8,17 +8,19 @@ mod theme;
 
 pub use self::{
     io::{
-        config_dir, config_path, load_live_keybinds, save_onboarding_choices, upsert_section_bool,
-        upsert_section_value,
+        config_diagnostic_summary, config_dir, config_path, load_live_config, remove_section_key,
+        upsert_section_bool, upsert_section_value,
     },
     keybinds::{
         format_key_combo, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
         Keybinds, LiveKeybindConfig,
     },
-    model::{Config, ToastConfig},
-    sound::{AgentSoundSetting, SoundConfig},
+    model::{Config, ConfigReloadReport, ConfigReloadStatus, ToastConfig, ToastDelivery},
+    sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
 };
+
+pub(crate) use self::io::upsert_top_level_bool;
 
 pub const CONFIG_PATH_ENV_VAR: &str = "HERDR_CONFIG_PATH";
 pub const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;

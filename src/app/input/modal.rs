@@ -9,7 +9,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModalAction {
     Continue,
-    Back,
     Save,
     Clear,
     Cancel,
@@ -70,7 +69,7 @@ pub(crate) enum GlobalMenuAction {
     Quit,
     WhatsNew,
     Keybinds,
-    ReloadKeybinds,
+    ReloadConfig,
     Settings,
 }
 
@@ -78,7 +77,7 @@ pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
     let mut actions = vec![
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
-        GlobalMenuAction::ReloadKeybinds,
+        GlobalMenuAction::ReloadConfig,
     ];
     if state.update_available.is_some() || state.latest_release_notes_available {
         actions.push(GlobalMenuAction::WhatsNew);
@@ -127,8 +126,8 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
         }
         GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
-        GlobalMenuAction::ReloadKeybinds => {
-            state.request_reload_keybinds = true;
+        GlobalMenuAction::ReloadConfig => {
+            state.request_reload_config = true;
             leave_modal(state);
         }
         GlobalMenuAction::Settings => super::settings::open_settings(state),
@@ -211,17 +210,6 @@ pub(super) const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &
     bindings: &[ModalKeyBinding::Enter],
 }];
 
-pub(super) const ONBOARDING_NOTIFICATION_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
-    ModalActionSpec {
-        action: ModalAction::Back,
-        bindings: &[ModalKeyBinding::Esc],
-    },
-    ModalActionSpec {
-        action: ModalAction::Save,
-        bindings: &[ModalKeyBinding::Enter],
-    },
-];
-
 pub(super) const RELEASE_NOTES_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
     action: ModalAction::Close,
     bindings: &[ModalKeyBinding::Enter, ModalKeyBinding::Esc],
@@ -275,7 +263,9 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             match state.mode {
                 Mode::RenameWorkspace if !state.workspaces.is_empty() => {
                     if !new_name.is_empty() {
+                        let workspace_id = state.workspaces[state.selected].id.clone();
                         state.workspaces[state.selected].set_custom_name(new_name);
+                        crate::logging::workspace_renamed(&workspace_id);
                         state.mark_session_dirty();
                     }
                 }
@@ -290,13 +280,19 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         };
                 }
                 Mode::RenameTab => {
-                    if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
-                        if let Some(tab) = ws.active_tab_mut() {
-                            let keep_auto_name =
-                                tab.is_auto_named() && new_name == tab.number.to_string();
-                            if !new_name.is_empty() && !keep_auto_name {
-                                tab.set_custom_name(new_name);
-                                state.mark_session_dirty();
+                    if let Some(ws_idx) = state.active {
+                        if let Some(ws) = state.workspaces.get_mut(ws_idx) {
+                            let workspace_id = ws.id.clone();
+                            let active_tab = ws.active_tab;
+                            if let Some(tab) = ws.active_tab_mut() {
+                                let keep_auto_name =
+                                    tab.is_auto_named() && new_name == tab.number.to_string();
+                                if !new_name.is_empty() && !keep_auto_name {
+                                    tab.set_custom_name(new_name);
+                                    let tab_id = format!("{}:{}", workspace_id, active_tab + 1);
+                                    crate::logging::tab_renamed(&workspace_id, &tab_id);
+                                    state.mark_session_dirty();
+                                }
                             }
                         }
                     }
